@@ -19,7 +19,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from skimage import io
-from net.unet import *
+from net.net import *
 import torch.optim as optim
 from utils.export_result import *
 from utils.utils_dataset import *
