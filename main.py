@@ -23,7 +23,7 @@ from net.net import *
 import torch.optim as optim
 from utils.export_result import *
 from utils.utils_dataset import *
-from net.net import Net
+from net.net import CRFNet
 from dataset.dataset import ISPRS_dataset
 from net.test_network import test
 
