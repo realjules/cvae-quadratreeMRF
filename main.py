@@ -49,9 +49,14 @@ def main(args):
     CACHE = True # Store the dataset in-memory
     
     ################################################ CAMBIA
-    DATA_FOLDER = FOLDER + '/top/top_mosaic_09cm_area{}.tif'
-    LABEL_FOLDER = FOLDER + '/gt/top_mosaic_09cm_area{}.tif'
-    ERODED_FOLDER = FOLDER + '/gt_eroded/top_mosaic_09cm_area{}_noBoundary.tif'
+    # For Potsdam dataset
+    DATA_FOLDER = FOLDER + '/path_to_potsdam_images/top_potsdam_{}_{}.tif'  # Need to check actual image path
+    LABEL_FOLDER = FOLDER + '/5_Labels_for_participants/5_Labels_for_participants/top_potsdam_{}_{}_label.tif'
+    ERODED_FOLDER = FOLDER + '/5_Labels_for_participants_no_Boundary/5_Labels_for_participants_no_Boundary/top_potsdam_{}_{}_label_noBoundary.tif'
+
+    # DATA_FOLDER = FOLDER + '/top/top_mosaic_09cm_area{}.tif'
+    # LABEL_FOLDER = FOLDER + '/gt/top_mosaic_09cm_area{}.tif'
+    # ERODED_FOLDER = FOLDER + '/gt_eroded/top_mosaic_09cm_area{}_noBoundary.tif'
         
     net = CRFNet(n_channels=IN_CHANNELS, n_classes=N_CLASSES, bilinear=True)
     
