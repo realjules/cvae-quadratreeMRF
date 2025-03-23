@@ -150,15 +150,3 @@ If you use this code in your research, please cite our paper:
   publisher={}
 }
 ```
-
-## Acknowledgements
-
-This work was conducted at Carnegie Mellon University Africa.
-
-The ISPRS 2D Semantic Labeling Challenge Datasets were provided by the German Society for Photogrammetry, Remote Sensing and Geoinformation (DGPF).
-
-Our baseline model, CRFNet, was developed by [Pastorino et al.](https://ieeexplore.ieee.org/document/10659885).
-
-## License
-
-This project is licensed under the GPL-3.0 License - see the LICENSE file for details.
