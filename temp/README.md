@@ -1,94 +1,164 @@
-# FCN and Fully Connected NN for Remote Sensing Image Classification
+# Semi-Supervised Hierarchical PGM with Contrastive Learning
 
-This repository contains the code related to the paper:  
+This repository implements a novel semi-supervised framework that combines contrastive learning with a hierarchical probabilistic graphical model (PGM) for semantic segmentation of remote sensing images. The approach integrates a contrastive variational autoencoder (CVAE) with a quadtree-based Markov random field (MRF) to achieve robust generalization with minimal labeled data.
 
-M. Pastorino, G. Moser, S. B. Serpico, and J. Zerubia, "Fully convolutional and feedforward networks for the semantic segmentation of remotely sensed images," 2022 IEEE International Conference on Image Processing, 2022, [https://hal.inria.fr/hal-03720693](https://hal.inria.fr/hal-03720693).
+![Architecture Overview](arch.PNG)
 
-When using this work, please cite our IEEE ICIP'22 conference paper:
+## Key Features
 
-M. Pastorino, G. Moser, S. B. Serpico, and J. Zerubia, "Fully convolutional and feedforward networks for the semantic segmentation of remotely sensed images," in IEEE International Conference on Image Processing, Bordeaux, France, 2022. 
+- **Contrastive Variational Autoencoder (CVAE)**: Learns discriminative latent representations from unlabeled imagery
+- **Quadtree-based Markov Random Field**: Captures spatial dependencies at multiple resolutions
+- **Hierarchical Belief Propagation**: Refines segmentation through multi-level message passing
+- **Semi-Supervised Learning Approach**: Effectively utilizes both labeled and unlabeled data
+
+## Repository Structure
 
 ```
-@ARTICLE{pastorino_icip22,
-  author={Pastorino, Martina and Moser, Gabriele and Serpico, Sebastiano B. and Zerubia, Josiane},
-  journal={IEEE International Conference on Image Processing}, 
-  title={Fully convolutional and feedforward networks for the semantic segmentation of remotely sensed images}, 
-  year={2022},
-  volume={},
-  number={},
-  pages={},
-  doi={}}
+cvae-quadratreeMRF/
+├── dataset/ - Data loaders and preprocessing
+│   └── dataset.py - ISPRS dataset implementation
+├── docs/ - Documentation and research materials
+│   └── research_proposal.pdf - Project research proposal
+├── input/ - Input data directory
+├── net/ - Neural network models
+│   ├── cvae.py - Contrastive Variational Autoencoder implementation
+│   ├── loss.py - Custom loss functions for semi-supervised learning
+│   ├── net.py - Hierarchical PGM with integrated components
+│   └── quadtree_mrf.py - Quadtree MRF implementation
+├── output/ - Results and model checkpoints
+├── utils/ - Utility functions
+│   ├── export_result.py - Result export and visualization
+│   ├── losses.py - Additional loss function implementations
+│   ├── utils.py - General utility functions
+│   ├── utils_dataset.py - Dataset-specific utilities
+│   └── utils_network.py - Network-specific utilities
+├── main.py - Training and testing entry point
+├── requirements.txt - Project dependencies
+└── README.md - Project documentation
 ```
 
 ## Installation
 
-The code was built on a virtual environment running on Python 3.9
+The code was developed and tested with Python 3.9.
 
-### Step 1: Clone the repository
+### Clone the Repository
 
+```bash
+git clone https://github.com/realjules/cvae-quadratreeMRF.git
+cd cvae-quadratreeMRF
 ```
-git clone --recursive https://github.com/Ayana-Inria/FCN-FFNET_RS-semantic-segmentation.git
-```
 
-### Step 2: Clone the repository
+### Install Dependencies
 
-```
-cd FCN-FFNET_RS-semantic-segmentation
-
+```bash
 pip install -r requirements.txt
 ```
 
-### Step 3: Run the code
+## Dataset
 
-1. Train the model on a scarce GT set 
+This implementation uses the [ISPRS Vaihingen and Potsdam datasets](http://www2.isprs.org/commissions/comm3/wg4/2d-sem-label-vaihingen.html), which consist of very high-resolution aerial imagery with pixel-wise semantic labels. The datasets can be downloaded from [Kaggle](https://www.kaggle.com/datasets/bkfateam/potsdamvaihingen).
 
-```
-python main.py -r -g conncomp
-```
-2. Infer on data
+Expected data structure:
 
 ```
-python main.py -g full
-```
-
-
-## Project structure
-
-```
-semantic_segmentation
-├── dataset - contains the data loader
-├── input - images to train and test the network 
-├── net - contains the loss, the network, and the training and testing functions
-├── output - should contain the results of the training / inference
-|   ├── exp_name
-|   └── model.pth
-├── utils - misc functions
-└── main.py - program to run
-```
-  
-## Data
-
-The model is trained on the [ISPRS Vaihingen dataset](http://www2.isprs.org/commissions/comm3/wg4/2d-sem-label-vaihingen.html) and [ISPRS Potsdam dataset](http://www2.isprs.org/potsdam-2d-semantic-labeling.html). The two datasets consist of VHR optical images (spatial resolutions of 9 and 5cm, respectively), we used the IRRG channels. They can be downloaded on [Kaggle](https://www.kaggle.com/datasets/bkfateam/potsdamvaihingen) and should be inserted in the folder `/input`.
-
-The data should have the following structure. 
-
-```
-input
-├── top
-|   └── top_mosaic_09cm_area{}.tif
-├── gt
-|   └── top_mosaic_09cm_area{}.tif
-└── gt_eroded
+input/
+├── top/ - Input images
+│   └── top_mosaic_09cm_area{}.tif
+├── gt/ - Ground truth labels
+│   └── top_mosaic_09cm_area{}.tif
+└── gt_eroded/ - Eroded ground truth (for boundary-aware training)
     └── top_mosaic_09cm_area{}_noBoundary.tif
 ```
 
+## Usage
 
-## License
+### Training
 
-The code is released under the GPL-3.0-only license. See `LICENSE.md` for more details.
+The model can be trained in three modes:
+- Full semi-supervised learning (both labeled and unlabeled data)
+- Supervised learning only (minimal labeled data)
+- Unsupervised learning only (contrastive CVAE)
+
+To train the model with sparse ground truth:
+
+```bash
+python main.py -r -g conncomp
+```
+
+### Inference
+
+To run inference on test data:
+
+```bash
+python main.py -g full
+```
+
+### Configuration Options
+
+- `-r, --retrain`: Retrain the model (omit to use a pre-trained model)
+- `-g, --gt_type`: Ground truth type (`conncomp` for connected components, `full` for full labels, `ero` for eroded labels)
+- `-w, --window`: Window size for training patches (default: 256x256)
+- `-b, --batch_size`: Batch size (default: 10)
+- `-d, --ero_disk`: Disk size for morphological operations (default: 8)
+- `-exp, --experiment_name`: Name for the experiment
+- `-lr, --base_lr`: Base learning rate (default: 0.01)
+- `-e, --epochs`: Number of training epochs (default: 30)
+
+## Model Architecture
+
+### Contrastive Variational Autoencoder (CVAE)
+
+The CVAE learns discriminative latent representations from unlabeled data. It consists of:
+- An encoder that maps input images to a latent space
+- A decoder that reconstructs images from latent representations
+- A projection head for contrastive learning
+- Loss functions for reconstruction, KL divergence, and contrastive learning
+
+### Quadtree MRF
+
+The Quadtree MRF captures spatial dependencies at multiple resolutions by:
+- Building a hierarchical quadtree structure of the image
+- Implementing belief propagation for label inference
+- Capturing pairwise and higher-order relationships between regions
+- Integrating with the CVAE latent features
+
+### Hierarchical PGM
+
+The complete model integrates the CVAE and Quadtree MRF, with:
+- A shared encoder for feature extraction
+- Multi-scale feature fusion
+- Hierarchical segmentation heads at different resolutions
+- Belief propagation for label refinement
+
+## Results
+
+The model achieves superior performance compared to conventional semi-supervised methods, especially with limited labeled data. Results are evaluated on the ISPRS Vaihingen and Potsdam benchmarks, using metrics such as:
+- Overall accuracy
+- F1 score per class
+- Mean Intersection over Union (mIoU)
+
+## Citation
+
+If you use this code in your research, please cite our paper:
+
+```
+@article{niyitegeka2023semisupervised,
+  title={Semi-Supervised Hierarchical PGM with Contrastive Learning},
+  author={Niyitegeka, Leonard and Udahemuka, Jules},
+  journal={},
+  year={2023},
+  publisher={}
+}
+```
 
 ## Acknowledgements
 
-This work was conducted during my joint PhD at [INRIA](https://team.inria.fr/ayana/team-members/), d'Université Côte d'Azur and at the [University of Genoa](http://phd-stiet.diten.unige.it/). 
+This work was conducted at Carnegie Mellon University Africa.
+
 The ISPRS 2D Semantic Labeling Challenge Datasets were provided by the German Society for Photogrammetry, Remote Sensing and Geoinformation (DGPF).
-The code to deal with the ISPRS dataset derives from the GitHub repository [Deep learning for Earth Observation](https://github.com/nshaud/DeepNetsForEO).
+
+Our baseline model, CRFNet, was developed by [Pastorino et al.](https://ieeexplore.ieee.org/document/10659885).
+
+## License
+
+This project is licensed under the GPL-3.0 License - see the LICENSE file for details.
