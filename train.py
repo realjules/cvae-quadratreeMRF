@@ -1,94 +1,166 @@
 # -*- coding: utf-8 -*-
 """
-Created on Sun Apr  3 18:52:11 2022
-
-@author: marti
+Training function for Semi-Supervised Hierarchical PGM with Contrastive Learning
 """
 
-from IPython.display import clear_output
-from tqdm import tqdm
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.utils.data as data
-import torch.nn.init
-from torch.autograd import Variable
-from net.net import *
-from utils.utils import *
-from net.loss import *
 import numpy as np
 import matplotlib.pyplot as plt
-from utils.utils_dataset import *
-from net.test_network import test
-import cv2
+from tqdm import tqdm
+from torch.autograd import Variable
+from utils.utils_dataset import convert_to_color
+from utils.utils import accuracy
 
 
-
-
-def train(net, optimizer, epochs, save_epoch, weights, train_loader, batch_size, window_size, output_folder, scheduler=None):
+def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader, 
+          epochs, save_epoch, weights, batch_size, window_size, output_path):
+    """
+    Train the Semi-Supervised Hierarchical PGM model
+    
+    Parameters:
+    -----------
+    net: torch.nn.Module
+        The hierarchical PGM model
+    criterion: torch.nn.Module
+        The loss function (HierarchicalPGMLoss)
+    optimizer: torch.optim.Optimizer
+        The optimizer
+    scheduler: torch.optim.lr_scheduler
+        Learning rate scheduler
+    labeled_loader: torch.utils.data.DataLoader
+        DataLoader for labeled data
+    unlabeled_loader: torch.utils.data.DataLoader or None
+        DataLoader for unlabeled data (None if all data is labeled)
+    epochs: int
+        Number of training epochs
+    save_epoch: int
+        Save model every N epochs
+    weights: torch.Tensor
+        Class weights for loss function
+    batch_size: int
+        Batch size
+    window_size: tuple
+        Window size for patches
+    output_path: str
+        Path to save model and results
+    """
+    # Loss tracking
     losses = np.zeros(1000000)
     mean_losses = np.zeros(100000000)
-    weights = weights.cuda()
-
-    criterion = nn.NLLLoss(weight=weights)
     iter_ = 0
     
-    for e in tqdm(range(1, epochs + 1)):
-
+    for e in tqdm(range(1, epochs + 1), desc="Epochs"):
+        # Training mode
         net.train()
-        for batch_idx, (data, target) in enumerate(train_loader):
-            target = target.data.cpu().numpy()
-            target = np.transpose(target, [1,2,0])
-            target3 = np.transpose(cv2.resize(target, dsize=(128, 128), interpolation=cv2.INTER_NEAREST), [2,0,1])
-            target2 = np.transpose(cv2.resize(target, dsize=(64, 64), interpolation=cv2.INTER_NEAREST), [2,0,1])
-            target1 = np.transpose(cv2.resize(target, dsize=(32, 32), interpolation=cv2.INTER_NEAREST), [2,0,1])
-            target = np.transpose(target, [2,0,1])
-            # add weights for mlp loss
-            data, target = Variable(data.cuda()), Variable(torch.from_numpy(target).cuda())
+        
+        # Train with labeled data
+        for batch_idx, (data, target) in enumerate(tqdm(labeled_loader, desc=f"Labeled data (Epoch {e})", leave=False)):
+            if torch.cuda.is_available():
+                data, target = Variable(data.cuda()), Variable(target.cuda())
+            else:
+                data, target = Variable(data), Variable(target)
+            
             optimizer.zero_grad()
-            output, out_fc, out_neigh = net(data)[:3]
-            loss = CrossEntropy2d(output, target, weight=weights)
-            loss_fc1 = CrossEntropy2d(out_fc[0], Variable(torch.from_numpy(target1).type(torch.LongTensor).cuda()), weight=compute_class_weight(target1).cuda())
-            loss_fc2 = CrossEntropy2d(out_fc[1], Variable(torch.from_numpy(target2).type(torch.LongTensor).cuda()), weight=compute_class_weight(target2).cuda())
-            loss_fc3 = CrossEntropy2d(out_fc[2], Variable(torch.from_numpy(target3).type(torch.LongTensor).cuda()), weight=compute_class_weight(target3).cuda())
-            pairwise_loss = CrossEntropy2d(out_neigh, target, weight=weights)
-            loss = (loss + loss_fc1 + loss_fc2 + loss_fc3) / 4 + pairwise_loss
+            
+            # Forward pass with labeled data (supervised mode)
+            outputs = net(data, mode='full')
+            
+            # Calculate loss
+            loss, loss_components = criterion(outputs, target, mode='full')
+            
+            # Backward pass
             loss.backward()
             optimizer.step()
-
-            #losses.i
-
-            losses[iter_] = loss.item()  #loss.data[0]
-            mean_losses[iter_] = np.mean(losses[max(0,iter_-100):iter_])
             
+            # Record loss
+            losses[iter_] = loss.item()
+            mean_losses[iter_] = np.mean(losses[max(0, iter_-100):iter_+1])
+            
+            # Visualize progress
             if iter_ % 100 == 0:
-                clear_output()
-                rgb = np.asarray(255 * np.transpose(data.data.cpu().numpy()[0],(1,2,0)), dtype='uint8')
-                pred = np.argmax(output.data.cpu().numpy()[0], axis=0)
-                gt = target.data.cpu().numpy()[0]
-                print('Train (epoch {}/{}) [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tAccuracy: {}'.format(
-                    e, epochs, batch_idx, len(train_loader),
-                    100. * batch_idx / len(train_loader), loss.item(), accuracy(pred, gt)))
-                plt.plot(mean_losses[:iter_]) and plt.show()
-                fig = plt.figure()
-                fig.add_subplot(131)
-                plt.imshow(rgb)
-                plt.title('RGB')
-                fig.add_subplot(132)
-                plt.imshow(convert_to_color(gt))
-                plt.title('Ground truth')
-                fig.add_subplot(133)
-                plt.title('Prediction')
-                plt.imshow(convert_to_color(pred))
-                plt.show()
-            iter_ += 1
+                # Display current results
+                with torch.no_grad():
+                    # Get segmentation prediction
+                    if 'final_segmentation' in outputs:
+                        pred = outputs['final_segmentation'][0].argmax(dim=0).cpu().numpy()
+                    else:
+                        pred = outputs['hierarchical_segmentations'][-1][0].argmax(dim=0).cpu().numpy()
+                    
+                    # Convert to visualizable format
+                    rgb = np.asarray(255 * np.transpose(data.cpu().numpy()[0], (1,2,0)), dtype='uint8')
+                    gt = target.cpu().numpy()[0]
+                    
+                    # Calculate accuracy
+                    acc = accuracy(pred, gt)
+                    
+                    # Print current stats
+                    print(f'Epoch {e}/{epochs} [{batch_idx}/{len(labeled_loader)} ({100*batch_idx/len(labeled_loader):.0f}%)]')
+                    print(f'Total Loss: {loss.item():.4f}, Accuracy: {acc:.2f}%')
+                    
+                    for component, value in loss_components.items():
+                        print(f'{component}: {value.item():.4f}')
+                    
+                    # Plot loss curve
+                    plt.figure(figsize=(10, 4))
+                    plt.plot(mean_losses[:iter_+1])
+                    plt.title('Mean Loss')
+                    plt.grid(True)
+                    plt.savefig(f"{output_path}/loss_curve.png")
+                    plt.close()
+                    
+                    # Visualize predictions
+                    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+                    ax1.imshow(rgb)
+                    ax1.set_title('RGB Input')
+                    ax2.imshow(convert_to_color(gt))
+                    ax2.set_title('Ground Truth')
+                    ax3.imshow(convert_to_color(pred))
+                    ax3.set_title('Prediction')
+                    plt.savefig(f"{output_path}/prediction_epoch{e}_iter{iter_}.png")
+                    plt.close()
             
-            del(data, target, loss)
-
+            iter_ += 1
+        
+        # Train with unlabeled data if available
+        if unlabeled_loader is not None:
+            for batch_idx, (data, _) in enumerate(tqdm(unlabeled_loader, desc=f"Unlabeled data (Epoch {e})", leave=False)):
+                if torch.cuda.is_available():
+                    data = Variable(data.cuda())
+                else:
+                    data = Variable(data)
+                
+                optimizer.zero_grad()
+                
+                # Forward pass with unlabeled data (unsupervised mode)
+                outputs = net(data, mode='unsupervised')
+                
+                # Calculate unsupervised loss
+                loss, loss_components = criterion(outputs, targets=None, mode='unsupervised')
+                
+                # Backward pass
+                loss.backward()
+                optimizer.step()
+                
+                # Record loss (but don't visualize for unlabeled data)
+                losses[iter_] = loss.item()
+                mean_losses[iter_] = np.mean(losses[max(0, iter_-100):iter_+1])
+                
+                if batch_idx % 100 == 0:
+                    print(f'Unsupervised Loss: {loss.item():.4f}')
+                    for component, value in loss_components.items():
+                        print(f'{component}: {value.item():.4f}')
+                
+                iter_ += 1
+        
+        # Update learning rate
         if scheduler is not None:
             scheduler.step()
-
+        
+        # Save model checkpoint
         if e % save_epoch == 0:
-            # We validate with the largest possible stride for faster computing
-            torch.save(net.state_dict(), output_folder + '/test_epoch{}'.format(e))
-    torch.save(net.state_dict(), output_folder + '/test_final')
+            torch.save(net.state_dict(), f'{output_path}/model_epoch{e}.pth')
+            print(f"Model saved at epoch {e}")
+    
+    # Save final model
+    torch.save(net.state_dict(), f'{output_path}/model_final.pth')
+    print("Training completed. Final model saved.")
