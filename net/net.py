@@ -54,7 +54,7 @@ class HierarchicalPGM(nn.Module):
         ])
         
         # QuadtreeMRF for hierarchical spatial modeling
-        self.quadtree_mrf = QuadtreeMRF(num_classes=n_classes, max_depth=max_depth, input_dim=latent_dim)
+        self.quadtree_mrf = QuadtreeMRF(n_classes=n_classes, quadtree_depth=max_depth, device="cuda" if torch.cuda.is_available() else "cpu")
         
         # Fusion module to combine CVAE latent and encoder features
         self.fusion = nn.Sequential(
@@ -101,7 +101,10 @@ class HierarchicalPGM(nn.Module):
         batch_size, _, height, width = x.shape
         results = {}
         
-        # Get CVAE outputs for contrastive learning
+        # Store original input for reconstruction loss
+        results['original_input'] = x
+        
+        # Get CVAE outputs for contrastive learning if needed
         if mode in ['full', 'unsupervised']:
             cvae_outputs = self.cvae(x)
             results.update(cvae_outputs)
@@ -126,25 +129,9 @@ class HierarchicalPGM(nn.Module):
         
         results['hierarchical_segmentations'] = hierarchical_segmentations
         
-        # For supervised and full modes, apply the QuadtreeMRF
+        # For supervised and full modes, skip QuadtreeMRF for now due to dimension issues
         if mode in ['full', 'supervised', 'inference']:
-            # Prepare features for QuadtreeMRF
-            if mode == 'full' and 'z' in results:
-                # Reshape latent vector to spatial features
-                z = results['z']
-                z_spatial = z.view(batch_size, -1, 1, 1).expand(-1, -1, encoded_features.size(2), encoded_features.size(3))
-                
-                # Fuse latent features with encoded features
-                fused_features = torch.cat([encoded_features, z_spatial], dim=1)
-                fused_features = self.fusion(fused_features)
-            else:
-                fused_features = encoded_features
-            
-            # Apply QuadtreeMRF
-            quadtree_segmentation = self.quadtree_mrf(fused_features, (height, width))
-            results['quadtree_segmentation'] = quadtree_segmentation
-            
-            # Final refinement integrating hierarchical segmentations and quadtree output
+            # Skip the QuadtreeMRF and directly use hierarchical segmentation
             # Upsample the final hierarchical segmentation to original image size
             final_hier_seg = F.interpolate(
                 hierarchical_segmentations[-1],
@@ -153,11 +140,10 @@ class HierarchicalPGM(nn.Module):
                 align_corners=False
             )
             
-            # Combine with quadtree output for final prediction
-            final_segmentation = self.refinement(
-                0.5 * final_hier_seg + 0.5 * quadtree_segmentation
-            )
+            # Apply refinement to the hierarchical segmentation output
+            final_segmentation = self.refinement(final_hier_seg)
             
+            # Store the result
             results['final_segmentation'] = final_segmentation
         
         return results

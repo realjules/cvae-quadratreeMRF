@@ -165,22 +165,59 @@ class QuadtreeMRF(nn.Module):
         
         for b in range(batch_size):
             root = trees[b]
-            features = latent_features[b]
+            features = latent_features[b] if len(latent_features.shape) == 4 else latent_features
             
             # Process all leaf nodes
             leaves = root.get_leaf_nodes()
             
             for leaf in leaves:
-                # Extract features for this region
-                region_features = features[:, leaf.y:leaf.y+leaf.size, leaf.x:leaf.x+leaf.size]
-                # Pool features to get a single vector
-                pooled_features = F.adaptive_avg_pool2d(
-                    region_features.unsqueeze(0), 
-                    (1, 1)
-                ).squeeze()
+                try:
+                    # Extract features for this region - handle dimensions properly
+                    if len(features.shape) == 3:  # [C, H, W]
+                        region_features = features[:, leaf.y:leaf.y+leaf.size, leaf.x:leaf.x+leaf.size]
+                        # Pool features to get a single vector
+                        pooled_features = F.adaptive_avg_pool2d(
+                            region_features.unsqueeze(0), 
+                            (1, 1)
+                        ).squeeze()
+                    else:  # Assume it's a flat vector [C]
+                        pooled_features = features
+                    
+                    # Project features to class scores
+                    leaf.unary_potentials = self.unary_projection(pooled_features).squeeze()
+                except Exception as e:
+                    print(f"Error in compute_unary_potentials: {e}")
+                    # Provide a fallback - uniform distribution
+                    leaf.unary_potentials = torch.ones(self.n_classes, device=self.device) / self.n_classes
+        
+    # def compute_unary_potentials(self, trees, latent_features):
+    #     """
+    #     Compute unary potentials for all nodes in the quadtree
+        
+    #     Args:
+    #         trees: List of quadtree root nodes
+    #         latent_features: Features from CVAE [B, C, H, W]
+    #     """
+    #     batch_size = len(trees)
+        
+    #     for b in range(batch_size):
+    #         root = trees[b]
+    #         features = latent_features[b]
+            
+    #         # Process all leaf nodes
+    #         leaves = root.get_leaf_nodes()
+            
+    #         for leaf in leaves:
+    #             # Extract features for this region
+    #             region_features = features[:, leaf.y:leaf.y+leaf.size, leaf.x:leaf.x+leaf.size]
+    #             # Pool features to get a single vector
+    #             pooled_features = F.adaptive_avg_pool2d(
+    #                 region_features.unsqueeze(0), 
+    #                 (1, 1)
+    #             ).squeeze()
                 
-                # Project features to class scores
-                leaf.unary_potentials = self.unary_projection(pooled_features).squeeze()
+    #             # Project features to class scores
+    #             leaf.unary_potentials = self.unary_projection(pooled_features).squeeze()
     
     def compute_pairwise_potentials(self, trees):
         """
@@ -309,28 +346,46 @@ class QuadtreeMRF(nn.Module):
         
         return segmentations
     
-    def forward(self, features, cvae_latent, initial_segmentation=None):
+    # def forward(self, features, cvae_latent, initial_segmentation=None):
+    #     """
+    #     Forward pass through the Quadtree MRF
+        
+    #     Args:
+    #         features: Feature maps from base network [B, C, H, W]
+    #         cvae_latent: Latent features from CVAE [B, C, H, W]
+    #         initial_segmentation: Optional initial segmentation [B, H, W]
+            
+    #     Returns:
+    #         Refined segmentation maps [B, H, W]
+    #     """
+    #     # Build the quadtree structure
+    #     trees = self.build_quadtree(features, initial_segmentation)
+        
+    #     # Compute unary potentials for leaf nodes
+    #     self.compute_unary_potentials(trees, cvae_latent)
+        
+    #     # Compute pairwise potentials between neighboring nodes
+    #     self.compute_pairwise_potentials(trees)
+        
+    #     # Run belief propagation to infer final labels
+    #     refined_segmentation = self.belief_propagation(trees, self.bp_iterations)
+        
+    #     return refined_segmentation
+
+    def forward(self, features, cvae_latent=None, initial_segmentation=None):
         """
-        Forward pass through the Quadtree MRF
+        Forward pass through the Quadtree MRF - simplified for debugging
         
         Args:
             features: Feature maps from base network [B, C, H, W]
-            cvae_latent: Latent features from CVAE [B, C, H, W]
-            initial_segmentation: Optional initial segmentation [B, H, W]
-            
-        Returns:
-            Refined segmentation maps [B, H, W]
+            cvae_latent: Latent features from CVAE (optional)
+            initial_segmentation: Optional initial segmentation
         """
-        # Build the quadtree structure
-        trees = self.build_quadtree(features, initial_segmentation)
+        # Simple segmentation head for testing
+        batch_size, n_features, height, width = features.shape
         
-        # Compute unary potentials for leaf nodes
-        self.compute_unary_potentials(trees, cvae_latent)
+        # Create a basic segmentation output for testing
+        # This will be replaced with proper quadtree logic once debugging is complete
+        simple_output = torch.nn.Conv2d(n_features, self.n_classes, kernel_size=1).to(features.device)(features)
         
-        # Compute pairwise potentials between neighboring nodes
-        self.compute_pairwise_potentials(trees)
-        
-        # Run belief propagation to infer final labels
-        refined_segmentation = self.belief_propagation(trees, self.bp_iterations)
-        
-        return refined_segmentation
+        return simple_output
