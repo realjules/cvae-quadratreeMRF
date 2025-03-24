@@ -125,7 +125,7 @@ def main(args):
     # Test the model
     test_images = (1/255 * np.asarray(io.imread(DATA_FOLDER.format(id)), dtype='float32') for id in test_ids)
     test_labels = (np.asarray(io.imread(LABEL_FOLDER.format(id)), dtype='uint8') for id in test_ids)
-    eroded_labels = (convert_from_color(io.imread(ERODED_FOLDER.format(id))) for id in test_ids)
+    eroded_labels = (convert_from_color(io.imread(LABEL_FOLDER.format(id))) for id in test_ids)
     
     stride = args.stride
     acc_test, all_preds, all_gts = test(net, test_ids, test_images, test_labels, eroded_labels,
