@@ -45,13 +45,17 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
         Path to save model and results
     """
     # Loss tracking
-    losses = np.zeros(1000000)
-    mean_losses = np.zeros(100000000)
-    iter_ = 0
+    epoch_losses = []
     
     for e in tqdm(range(1, epochs + 1), desc="Epochs"):
         # Training mode
         net.train()
+        
+        # Track losses for this epoch
+        epoch_supervised_losses = []
+        epoch_unsupervised_losses = []
+        epoch_total_loss = 0.0
+        num_batches = 0
         
         # Train with labeled data
         for batch_idx, (data, target) in enumerate(tqdm(labeled_loader, desc=f"Labeled data (Epoch {e})", leave=False)):
@@ -72,54 +76,10 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
             loss.backward()
             optimizer.step()
             
-            # Record loss
-            losses[iter_] = loss.item()
-            mean_losses[iter_] = np.mean(losses[max(0, iter_-100):iter_+1])
-            
-            # Visualize progress
-            if iter_ % 100 == 0:
-                # Display current results
-                with torch.no_grad():
-                    # Get segmentation prediction
-                    if 'final_segmentation' in outputs:
-                        pred = outputs['final_segmentation'][0].argmax(dim=0).cpu().numpy()
-                    else:
-                        pred = outputs['hierarchical_segmentations'][-1][0].argmax(dim=0).cpu().numpy()
-                    
-                    # Convert to visualizable format
-                    rgb = np.asarray(255 * np.transpose(data.cpu().numpy()[0], (1,2,0)), dtype='uint8')
-                    gt = target.cpu().numpy()[0]
-                    
-                    # Calculate accuracy
-                    acc = accuracy(pred, gt)
-                    
-                    # Print current stats
-                    print(f'Epoch {e}/{epochs} [{batch_idx}/{len(labeled_loader)} ({100*batch_idx/len(labeled_loader):.0f}%)]')
-                    print(f'Total Loss: {loss.item():.4f}, Accuracy: {acc:.2f}%')
-                    
-                    for component, value in loss_components.items():
-                        print(f'{component}: {value.item():.4f}')
-                    
-                    # Plot loss curve
-                    plt.figure(figsize=(10, 4))
-                    plt.plot(mean_losses[:iter_+1])
-                    plt.title('Mean Loss')
-                    plt.grid(True)
-                    plt.savefig(f"{output_path}/loss_curve.png")
-                    plt.close()
-                    
-                    # Visualize predictions
-                    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
-                    ax1.imshow(rgb)
-                    ax1.set_title('RGB Input')
-                    ax2.imshow(convert_to_color(gt))
-                    ax2.set_title('Ground Truth')
-                    ax3.imshow(convert_to_color(pred))
-                    ax3.set_title('Prediction')
-                    plt.savefig(f"{output_path}/prediction_epoch{e}_iter{iter_}.png")
-                    plt.close()
-            
-            iter_ += 1
+            # Record loss for this batch
+            epoch_supervised_losses.append(loss.item())
+            epoch_total_loss += loss.item()
+            num_batches += 1
         
         # Train with unlabeled data if available
         if unlabeled_loader is not None:
@@ -141,16 +101,64 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
                 loss.backward()
                 optimizer.step()
                 
-                # Record loss (but don't visualize for unlabeled data)
-                losses[iter_] = loss.item()
-                mean_losses[iter_] = np.mean(losses[max(0, iter_-100):iter_+1])
+                # Record loss for this batch
+                epoch_unsupervised_losses.append(loss.item())
+                epoch_total_loss += loss.item()
+                num_batches += 1
+        
+        # Calculate average loss for this epoch
+        avg_epoch_loss = epoch_total_loss / num_batches if num_batches > 0 else 0
+        epoch_losses.append(avg_epoch_loss)
+        
+        # Evaluate model on a sample batch at the end of epoch
+        if len(labeled_loader) > 0:
+            with torch.no_grad():
+                # Get a sample batch
+                data, target = next(iter(labeled_loader))
+                if torch.cuda.is_available():
+                    data, target = data.cuda(), target.cuda()
+                    
+                # Forward pass
+                outputs = net(data, mode='full')
                 
-                if batch_idx % 100 == 0:
-                    print(f'Unsupervised Loss: {loss.item():.4f}')
-                    for component, value in loss_components.items():
-                        print(f'{component}: {value.item():.4f}')
+                # Get segmentation prediction for first image in batch
+                if 'final_segmentation' in outputs:
+                    pred = outputs['final_segmentation'][0].argmax(dim=0).cpu().numpy()
+                else:
+                    pred = outputs['hierarchical_segmentations'][-1][0].argmax(dim=0).cpu().numpy()
                 
-                iter_ += 1
+                # Convert to visualizable format
+                rgb = np.asarray(255 * np.transpose(data.cpu().numpy()[0], (1,2,0)), dtype='uint8')
+                gt = target.cpu().numpy()[0]
+                
+                # Calculate accuracy on this sample
+                sample_acc = accuracy(pred, gt)
+                
+                # Report epoch-level stats
+                print(f'Epoch {e}/{epochs} completed - Avg Loss: {avg_epoch_loss:.4f}, Sample Accuracy: {sample_acc:.2f}%')
+                
+                # Plot loss curve
+                plt.figure(figsize=(10, 4))
+                plt.plot(range(1, len(epoch_losses) + 1), epoch_losses)
+                plt.title('Average Loss per Epoch')
+                plt.xlabel('Epoch')
+                plt.ylabel('Loss')
+                plt.grid(True)
+                plt.savefig(f"{output_path}/epoch_loss_curve.png")
+                plt.close()
+                
+                # Only save sample visualization at end of epoch
+                if e % save_epoch == 0 or e == epochs:
+                    # Visualize predictions
+                    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+                    ax1.imshow(rgb)
+                    ax1.set_title('RGB Input')
+                    ax2.imshow(convert_to_color(gt))
+                    ax2.set_title('Ground Truth')
+                    ax3.imshow(convert_to_color(pred))
+                    ax3.set_title('Prediction')
+                    plt.savefig(f"{output_path}/prediction_epoch{e}.png")
+                    plt.close()
         
         # Update learning rate
         if scheduler is not None:
