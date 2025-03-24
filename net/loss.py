@@ -5,6 +5,11 @@ import torch.nn.functional as F
 def CrossEntropy2d(input, target, weight=None, reduction='mean'):
     """ 2D version of the cross entropy loss """
     dim = input.dim()
+    
+    # Move weight to the same device as input
+    if weight is not None:
+        weight = weight.to(input.device)
+        
     if dim == 2:
         return F.cross_entropy(input, target, weight, reduction, ignore_index=6)
     elif dim == 4:
@@ -15,7 +20,6 @@ def CrossEntropy2d(input, target, weight=None, reduction='mean'):
         return F.cross_entropy(output, target, weight, reduction, ignore_index=6)
     else:
         raise ValueError('Expected 2 or 4 dimensions (got {})'.format(dim))
-
 class HierarchicalPGMLoss(nn.Module):
     """
     Combined loss function for the Hierarchical PGM with Contrastive Learning.
@@ -51,6 +55,9 @@ class HierarchicalPGMLoss(nn.Module):
             loss_components: Dictionary of individual loss components
         """
         loss_components = {}
+        # Move weights to the same device as outputs if needed
+        if self.weights is not None:
+            self.weights = self.weights.to(outputs['hierarchical_segmentations'][0].device)
         
         # Supervised segmentation loss
         if targets is not None and mode in ['supervised', 'full']:
