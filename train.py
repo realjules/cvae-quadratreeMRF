@@ -47,6 +47,7 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
     # Loss tracking
     epoch_losses = []
     
+    # Use tqdm only for epoch-level progress, not batch-level
     for e in tqdm(range(1, epochs + 1), desc="Epochs"):
         # Training mode
         net.train()
@@ -57,8 +58,8 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
         epoch_total_loss = 0.0
         num_batches = 0
         
-        # Train with labeled data
-        for batch_idx, (data, target) in enumerate(tqdm(labeled_loader, desc=f"Labeled data (Epoch {e})", leave=False)):
+        # Train with labeled data - no tqdm progress bar here
+        for batch_idx, (data, target) in enumerate(labeled_loader):
             if torch.cuda.is_available():
                 data, target = Variable(data.cuda()), Variable(target.cuda())
             else:
@@ -81,9 +82,9 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
             epoch_total_loss += loss.item()
             num_batches += 1
         
-        # Train with unlabeled data if available
+        # Train with unlabeled data if available - no tqdm progress bar here
         if unlabeled_loader is not None:
-            for batch_idx, (data, _) in enumerate(tqdm(unlabeled_loader, desc=f"Unlabeled data (Epoch {e})", leave=False)):
+            for batch_idx, (data, _) in enumerate(unlabeled_loader):
                 if torch.cuda.is_available():
                     data = Variable(data.cuda())
                 else:
