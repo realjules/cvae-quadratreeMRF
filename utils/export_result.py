@@ -98,7 +98,7 @@ def export_results(outputs_list, labels_list, run_path, experiment_name,
                     countU += confusionMatrixList[r][c2][c1]
                     # count += confusionMatrixList[r][c2][c1] #for user accuracies
                 singleResProducerAccuracies[c1] /= countP
-                singleResUserAccuracies[c1] /= countU
+                singleResUserAccuracies[c1] /= countU if countU > 0 else 1
                 
             userAccuracyList.append(singleResUserAccuracies)
             producerAccuracyList.append(singleResProducerAccuracies)
