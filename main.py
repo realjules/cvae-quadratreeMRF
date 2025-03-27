@@ -69,9 +69,18 @@ def main(args):
         criterion.cuda()
         WEIGHTS = WEIGHTS.cuda()
     
-    # Define train and test data
-    train_ids = ['1', '3', '23', '26', '7', '11', '13', '28', '17', '32', '34', '37']
+    # Define train, validation, and test data
+    all_train_ids = ['1', '3', '23', '26', '7', '11', '13', '28', '17', '32', '34', '37']
     test_ids = ['5', '15', '21', '30']
+    
+    # Split training data into train and validation (80/20 split)
+    train_val_split = int(len(all_train_ids) * 0.8)
+    train_ids = all_train_ids[:train_val_split]
+    val_ids = all_train_ids[train_val_split:]
+    
+    print(f"Training IDs: {train_ids}")
+    print(f"Validation IDs: {val_ids}")
+    print(f"Test IDs: {test_ids}")
     
     # For semi-supervised learning, we use a portion of labeled data
     labeled_percentage = args.labeled_percentage
@@ -93,6 +102,12 @@ def main(args):
                                 data_files=DATA_FOLDER, label_files=LABEL_FOLDER,
                                 window_size=WINDOW_SIZE, cache=CACHE)
     
+    # Create validation dataset
+    val_set = ISPRS_dataset(val_ids, ids_type='VAL', gt_type=args.gt_type,
+                           gt_modification=disk(args.ero_disk),
+                           data_files=DATA_FOLDER, label_files=LABEL_FOLDER,
+                           window_size=WINDOW_SIZE, cache=CACHE)
+    
     test_set = ISPRS_dataset(test_ids, ids_type='TEST', gt_type=args.gt_type,
                              gt_modification=disk(args.ero_disk),
                              data_files=DATA_FOLDER, label_files=LABEL_FOLDER,
@@ -108,6 +123,7 @@ def main(args):
     
     # Create data loaders
     labeled_loader = torch.utils.data.DataLoader(labeled_set, batch_size)
+    val_loader = torch.utils.data.DataLoader(val_set, batch_size)
     test_loader = torch.utils.data.DataLoader(test_set, batch_size)
     
     # Set up experiment name and output location
@@ -117,7 +133,7 @@ def main(args):
     # Train or load the model
     if args.retrain:
         train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader,
-             epochs, save_epoch, WEIGHTS, batch_size, WINDOW_SIZE, output_path)
+             val_loader, epochs, save_epoch, WEIGHTS, batch_size, WINDOW_SIZE, output_path)
     else:
         model_weights = args.model_weights
         net.load_state_dict(torch.load(model_weights))

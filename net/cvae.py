@@ -11,6 +11,7 @@ class CVAE(nn.Module):
     def __init__(self, input_channels=3, latent_dim=128, hidden_dims=[32, 64, 128, 256]):
         super(CVAE, self).__init__()
         self.latent_dim = latent_dim
+        self.hidden_dims = hidden_dims
         
         # Encoder
         modules = []
@@ -31,7 +32,9 @@ class CVAE(nn.Module):
         
         # Calculate output size of encoder for fully connected layers
         # For an input of size (256, 256), after 4 strides of 2, the output is (16, 16)
-        self.encoder_output_size = hidden_dims[-1] * (256 // (2**len(hidden_dims))) * (256 // (2**len(hidden_dims)))
+        self.encoder_output_height = 256 // (2**len(hidden_dims))
+        self.encoder_output_width = 256 // (2**len(hidden_dims))
+        self.encoder_output_size = hidden_dims[-1] * self.encoder_output_height * self.encoder_output_width
         
         # Latent space
         self.fc_mu = nn.Linear(self.encoder_output_size, latent_dim)
@@ -87,8 +90,13 @@ class CVAE(nn.Module):
     
     def decode(self, z):
         """Decode latent representations back to images."""
+        batch_size = z.size(0)
         result = self.decoder_input(z)
-        result = result.view(-1, 256, 16, 16)  # Reshape to match encoder output shape
+        
+        # Reshape dynamically based on calculated dimensions
+        result = result.view(batch_size, self.hidden_dims[0], 
+                           self.encoder_output_height, 
+                           self.encoder_output_width)
         result = self.decoder(result)
         return result
     

@@ -108,12 +108,12 @@ class HierarchicalPGMLoss(nn.Module):
                 loss_components['recon_loss'] = recon_loss
             
             # KL divergence loss
-            if 'mu' in outputs and 'logvar' in outputs:
+            if 'mu' in outputs and 'log_var' in outputs:
                 mu = outputs['mu']
-                logvar = outputs['logvar']
+                log_var = outputs['log_var']
                 
                 # KL divergence: -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-                kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+                kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
                 # Normalize by batch size
                 kld_loss = kld_loss / mu.size(0)
                 loss_components['kld_loss'] = kld_loss * self.kld_weight
