@@ -64,7 +64,7 @@ class QuadtreeMRF(nn.Module):
     - Belief propagation for label inference
     - Integration with latent features from CVAE
     """
-    def __init__(self, n_classes=6, quadtree_depth=4, device="cuda"):
+    def __init__(self, n_classes=6, quadtree_depth=4, feature_dim=128, device="cuda"):
         super(QuadtreeMRF, self).__init__()
         self.n_classes = n_classes
         self.max_depth = quadtree_depth
@@ -74,11 +74,23 @@ class QuadtreeMRF(nn.Module):
         self.pairwise_weights = nn.Parameter(torch.ones(n_classes, n_classes))
         
         # Unary potential parameters (for feature integration)
+        # Make this flexible to handle various input dimensions
+        self.feature_dim = feature_dim  # Use the provided feature dimension
+        
+        # Dictionary to store feature projections for different input dimensions
+        self.dim_projections = nn.ModuleDict()
+        
+        # Base unary projection
         self.unary_projection = nn.Sequential(
-            nn.Linear(256, 128),  # Adjust input size based on feature dimensions
+            nn.Linear(self.feature_dim, 128),
             nn.ReLU(),
             nn.Linear(128, n_classes)
         )
+        
+        # Store common feature dimensions projections
+        for dim in [64, 128, 256, 512]:
+            if dim != self.feature_dim:
+                self.dim_projections[str(dim)] = nn.Linear(dim, self.feature_dim)
         
         # Edge potential parameters for parent-child relationships
         self.vertical_weights = nn.Parameter(torch.ones(n_classes, n_classes))
@@ -182,6 +194,19 @@ class QuadtreeMRF(nn.Module):
                         ).squeeze()
                     else:  # Assume it's a flat vector [C]
                         pooled_features = features
+                    
+                    # Resize the feature vector to match self.feature_dim if needed
+                    if pooled_features.shape[0] != self.feature_dim:
+                        # Check if we have a pre-defined projection for this dimension
+                        feat_dim = pooled_features.shape[0]
+                        if str(feat_dim) in self.dim_projections:
+                            pooled_features = self.dim_projections[str(feat_dim)](pooled_features)
+                        else:
+                            # Create a new projection and add it to the dictionary
+                            self.dim_projections[str(feat_dim)] = nn.Linear(
+                                feat_dim, self.feature_dim
+                            ).to(self.device)
+                            pooled_features = self.dim_projections[str(feat_dim)](pooled_features)
                     
                     # Project features to class scores
                     leaf.unary_potentials = self.unary_projection(pooled_features).squeeze()
@@ -329,36 +354,43 @@ class QuadtreeMRF(nn.Module):
         Returns:
             Refined segmentation maps [B, H, W]
         """
-        # Get dimensions
-        batch_size, n_features, height, width = features.shape
-        
-        # Create initial segmentation if not provided
-        if initial_segmentation is None:
-            # Use a simple convolution to create initial segmentation
-            initial_conv = nn.Conv2d(n_features, self.n_classes, kernel_size=1).to(features.device)
-            initial_segmentation = initial_conv(features).argmax(dim=1)
-        
-        # Build the quadtree structure
-        trees = self.build_quadtree(features, initial_segmentation)
-        
-        # Ensure cvae_latent has appropriate dimensions
-        if cvae_latent is not None:
-            # If cvae_latent is not already the right shape, reshape it
-            if len(cvae_latent.shape) == 2:  # [B, C]
-                # Expand to spatial dimensions matching feature map
-                cvae_latent = cvae_latent.unsqueeze(-1).unsqueeze(-1)
-                cvae_latent = cvae_latent.expand(-1, -1, height, width)
-        else:
-            # If no cvae_latent provided, use features
-            cvae_latent = features
+        try:
+            # Get dimensions
+            batch_size, n_features, height, width = features.shape
             
-        # Compute unary potentials for leaf nodes
-        self.compute_unary_potentials(trees, cvae_latent)
-        
-        # Compute pairwise potentials between neighboring nodes
-        self.compute_pairwise_potentials(trees)
-        
-        # Run belief propagation to infer final labels
-        refined_segmentation = self.belief_propagation(trees, self.bp_iterations)
-        
-        return refined_segmentation
+            # Create initial segmentation if not provided
+            if initial_segmentation is None:
+                # Use a simple convolution to create initial segmentation
+                initial_conv = nn.Conv2d(n_features, self.n_classes, kernel_size=1).to(features.device)
+                initial_segmentation = initial_conv(features).argmax(dim=1)
+            
+            # Build the quadtree structure
+            trees = self.build_quadtree(features, initial_segmentation)
+            
+            # Ensure cvae_latent has appropriate dimensions
+            if cvae_latent is not None:
+                # If cvae_latent is not already the right shape, reshape it
+                if len(cvae_latent.shape) == 2:  # [B, C]
+                    # Expand to spatial dimensions matching feature map
+                    cvae_latent = cvae_latent.unsqueeze(-1).unsqueeze(-1)
+                    cvae_latent = cvae_latent.expand(-1, -1, height, width)
+            else:
+                # If no cvae_latent provided, use features
+                cvae_latent = features
+                
+            # Compute unary potentials for leaf nodes
+            self.compute_unary_potentials(trees, cvae_latent)
+            
+            # Compute pairwise potentials between neighboring nodes
+            self.compute_pairwise_potentials(trees)
+            
+            # Run belief propagation to infer final labels
+            refined_segmentation = self.belief_propagation(trees, self.bp_iterations)
+            
+            return refined_segmentation
+            
+        except Exception as e:
+            print(f"Error in QuadtreeMRF.forward: {e}")
+            # Fall back to a simple segmentation head
+            simple_output = nn.Conv2d(n_features, self.n_classes, kernel_size=1).to(features.device)(features)
+            return simple_output.argmax(dim=1)

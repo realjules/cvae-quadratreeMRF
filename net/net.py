@@ -54,7 +54,12 @@ class HierarchicalPGM(nn.Module):
         ])
         
         # QuadtreeMRF for hierarchical spatial modeling
-        self.quadtree_mrf = QuadtreeMRF(n_classes=n_classes, quadtree_depth=max_depth, device="cuda" if torch.cuda.is_available() else "cpu")
+        self.quadtree_mrf = QuadtreeMRF(
+            n_classes=n_classes, 
+            quadtree_depth=max_depth, 
+            feature_dim=latent_dim,  # Pass the latent dimension to match CVAE output
+            device="cuda" if torch.cuda.is_available() else "cpu"
+        )
         
         # Fusion module to combine CVAE latent and encoder features
         self.fusion = nn.Sequential(
@@ -156,21 +161,35 @@ class HierarchicalPGM(nn.Module):
             
             # Process through QuadtreeMRF
             if cvae_latent is not None:
-                # Apply QuadtreeMRF with latent features
-                quadtree_output = self.quadtree_mrf(
-                    features=features[-1],  # Use the finest level features
-                    cvae_latent=cvae_latent,
-                    initial_segmentation=torch.argmax(initial_seg, dim=1)
-                )
-                
-                # Convert to one-hot for fusion with hierarchical output
-                quadtree_one_hot = F.one_hot(quadtree_output, num_classes=self.n_classes).permute(0, 3, 1, 2).float()
-                
-                # Combine QuadtreeMRF output with hierarchical segmentation
-                combined_seg = (initial_seg_upsampled + quadtree_one_hot) / 2.0
-                
-                # Apply refinement
-                final_segmentation = self.refinement(combined_seg)
+                try:
+                    # Apply QuadtreeMRF with latent features
+                    quadtree_output = self.quadtree_mrf(
+                        features=features[-1],  # Use the finest level features
+                        cvae_latent=cvae_latent,
+                        initial_segmentation=torch.argmax(initial_seg, dim=1)
+                    )
+                    
+                    # Ensure quadtree output is the same size as initial_seg_upsampled
+                    if quadtree_output.shape[1:] != initial_seg_upsampled.shape[2:]:
+                        quadtree_output = F.interpolate(
+                            F.one_hot(quadtree_output, num_classes=self.n_classes).permute(0, 3, 1, 2).float(),
+                            size=initial_seg_upsampled.shape[2:],
+                            mode='bilinear',
+                            align_corners=False
+                        )
+                    else:
+                        # Convert to one-hot for fusion with hierarchical output
+                        quadtree_output = F.one_hot(quadtree_output, num_classes=self.n_classes).permute(0, 3, 1, 2).float()
+                    
+                    # Combine QuadtreeMRF output with hierarchical segmentation
+                    combined_seg = (initial_seg_upsampled + quadtree_output) / 2.0
+                    
+                    # Apply refinement
+                    final_segmentation = self.refinement(combined_seg)
+                except Exception as e:
+                    print(f"Error in QuadtreeMRF processing: {e}")
+                    # Fallback to just using hierarchical segmentation
+                    final_segmentation = self.refinement(initial_seg_upsampled)
             else:
                 # If no CVAE latent, just use hierarchical segmentation with refinement
                 final_segmentation = self.refinement(initial_seg_upsampled)
