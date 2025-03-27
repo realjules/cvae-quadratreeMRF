@@ -84,46 +84,47 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
         num_batches = 0
         
         # Train with labeled data - no tqdm progress bar here
-        for batch_idx, (data, target) in enumerate(labeled_loader):
-            if torch.cuda.is_available():
-                data, target = Variable(data.cuda()), Variable(target.cuda())
-            else:
-                data, target = Variable(data), Variable(target)
-            
-            optimizer.zero_grad()
-            
-            # Forward pass with labeled data (supervised mode)
-            outputs = net(data, mode='full')
-            
-            # Calculate loss
-            loss, loss_components = criterion(outputs, target, mode='full')
-            
-            # Backward pass
-            loss.backward()
-            
-            # Calculate gradient norm for debugging
-            total_norm = 0
-            for p in net.parameters():
-                if p.grad is not None:
-                    param_norm = p.grad.data.norm(2)
-                    total_norm += param_norm.item() ** 2
-            total_norm = total_norm ** 0.5
-            grad_norms.append(total_norm)
-            
-            # Gradient clipping to prevent exploding gradients
-            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=10.0)
-            
-            optimizer.step()
-            
-            # Record loss for this batch
-            epoch_supervised_losses.append(loss.item())
-            epoch_total_loss += loss.item()
-            num_batches += 1
-            
-            # Track individual loss components
-            for component, value in loss_components.items():
-                if component in batch_component_losses:
-                    batch_component_losses[component].append(value.item() if torch.is_tensor(value) else value)
+        if len(labeled_loader) > 0:  # Only if we have labeled data
+            for batch_idx, (data, target) in enumerate(labeled_loader):
+                if torch.cuda.is_available():
+                    data, target = Variable(data.cuda()), Variable(target.cuda())
+                else:
+                    data, target = Variable(data), Variable(target)
+                
+                optimizer.zero_grad()
+                
+                # Forward pass with labeled data (supervised mode)
+                outputs = net(data, mode='full')
+                
+                # Calculate loss
+                loss, loss_components = criterion(outputs, target, mode='full')
+                
+                # Backward pass
+                loss.backward()
+                
+                # Calculate gradient norm for debugging
+                total_norm = 0
+                for p in net.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                total_norm = total_norm ** 0.5
+                grad_norms.append(total_norm)
+                
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=10.0)
+                
+                optimizer.step()
+                
+                # Record loss for this batch
+                epoch_supervised_losses.append(loss.item())
+                epoch_total_loss += loss.item()
+                num_batches += 1
+                
+                # Track individual loss components
+                for component, value in loss_components.items():
+                    if component in batch_component_losses:
+                        batch_component_losses[component].append(value.item() if torch.is_tensor(value) else value)
         
         # Train with unlabeled data if available - no tqdm progress bar here
         if unlabeled_loader is not None:
@@ -170,16 +171,23 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
             else:
                 component_losses[component].append(0)
         
-        # Validation step at the end of each epoch
-        val_loss, val_acc = validate(net, criterion, val_loader)
-        epoch_val_losses.append(val_loss)
-        epoch_val_acc.append(val_acc)
-        
-        # Save best model based on validation accuracy
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            torch.save(net.state_dict(), f'{output_path}/model_best.pth')
-            print(f"New best model saved with validation accuracy: {best_val_acc:.2f}%")
+        # Validation step at the end of each epoch (if we have validation data)
+        if len(val_loader) > 0:
+            val_loss, val_acc = validate(net, criterion, val_loader)
+            epoch_val_losses.append(val_loss)
+            epoch_val_acc.append(val_acc)
+            
+            # Save best model based on validation accuracy
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                torch.save(net.state_dict(), f'{output_path}/model_best.pth')
+                print(f"New best model saved with validation accuracy: {best_val_acc:.2f}%")
+        else:
+            # If no validation data, just use training loss
+            val_loss = avg_epoch_loss
+            val_acc = 0.0
+            epoch_val_losses.append(val_loss)
+            epoch_val_acc.append(val_acc)
         
         # Report epoch-level stats
         print(f'Epoch {e}/{epochs} - Train Loss: {avg_epoch_loss:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%')
@@ -282,11 +290,17 @@ def plot_training_curves(train_losses, val_losses, val_acc, component_losses, gr
     output_path: str
         Path to save plots
     """
+    # Skip if no data
+    if len(train_losses) == 0:
+        print("No training data to plot")
+        return
+    
     # Plot combined loss curves
     plt.figure(figsize=(12, 6))
     plt.subplot(1, 2, 1)
     plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss')
-    plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss')
+    if len(val_losses) > 0:
+        plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss')
     plt.title('Training and Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
@@ -294,11 +308,15 @@ def plot_training_curves(train_losses, val_losses, val_acc, component_losses, gr
     plt.grid(True)
     
     plt.subplot(1, 2, 2)
-    plt.plot(range(1, len(val_acc) + 1), val_acc)
-    plt.title('Validation Accuracy')
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy (%)')
-    plt.grid(True)
+    if len(val_acc) > 0:
+        plt.plot(range(1, len(val_acc) + 1), val_acc)
+        plt.title('Validation Accuracy')
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy (%)')
+        plt.grid(True)
+    else:
+        plt.text(0.5, 0.5, "No validation data", horizontalalignment='center',
+                 verticalalignment='center', transform=plt.gca().transAxes)
     
     plt.tight_layout()
     plt.savefig(f"{output_path}/training_curves.png")
@@ -306,6 +324,7 @@ def plot_training_curves(train_losses, val_losses, val_acc, component_losses, gr
     
     # Plot individual loss components
     plt.figure(figsize=(15, 10))
+    plotted = 0
     for i, (component, values) in enumerate(component_losses.items()):
         if any(values):  # Only plot non-zero components
             plt.subplot(3, 2, i + 1)
@@ -314,20 +333,28 @@ def plot_training_curves(train_losses, val_losses, val_acc, component_losses, gr
             plt.xlabel('Epoch')
             plt.ylabel('Loss')
             plt.grid(True)
+            plotted += 1
+    
+    if plotted == 0:
+        plt.text(0.5, 0.5, "No loss components to plot", horizontalalignment='center',
+                 verticalalignment='center', transform=plt.gca().transAxes)
     
     plt.tight_layout()
     plt.savefig(f"{output_path}/component_losses.png")
     plt.close()
     
     # Plot gradient norms
-    plt.figure(figsize=(10, 5))
-    plt.plot(grad_norms)
-    plt.title('Gradient Norms')
-    plt.xlabel('Batch')
-    plt.ylabel('Norm')
-    plt.grid(True)
-    plt.savefig(f"{output_path}/gradient_norms.png")
-    plt.close()
+    if len(grad_norms) > 0:
+        plt.figure(figsize=(10, 5))
+        plt.plot(grad_norms)
+        plt.title('Gradient Norms')
+        plt.xlabel('Batch')
+        plt.ylabel('Norm')
+        plt.grid(True)
+        plt.savefig(f"{output_path}/gradient_norms.png")
+        plt.close()
+    else:
+        print("No gradient norms to plot")
 
 
 def visualize_sample(net, data_loader, epoch, output_path):
@@ -347,42 +374,52 @@ def visualize_sample(net, data_loader, epoch, output_path):
     """
     net.eval()
     
+    # Skip visualization if no data
+    if len(data_loader) == 0:
+        print("No data available for visualization")
+        return
+    
     with torch.no_grad():
-        # Get a sample batch
-        data, target = next(iter(data_loader))
-        if torch.cuda.is_available():
-            data, target = data.cuda(), target.cuda()
-        
-        # Forward pass
-        outputs = net(data, mode='full')
-        
-        # Take the first image in the batch
-        img = data[0].cpu().numpy()
-        img = np.transpose(img, (1, 2, 0))  # Convert from CxHxW to HxWxC
-        img = (img * 255).astype(np.uint8)  # Assuming data is normalized to [0, 1]
-        
-        gt = target[0].cpu().numpy()
-        
-        # Get final segmentation
-        pred = outputs['final_segmentation'][0].argmax(dim=0).cpu().numpy()
-        
-        # Visualize
-        plt.figure(figsize=(15, 5))
-        
-        plt.subplot(1, 3, 1)
-        plt.imshow(img)
-        plt.title('Input Image')
-        plt.axis('off')
-        
-        plt.subplot(1, 3, 2)
-        plt.imshow(convert_to_color(gt))
-        plt.title('Ground Truth')
-        plt.axis('off')
-        
-        plt.subplot(1, 3, 3)
-        plt.imshow(convert_to_color(pred))
-        plt.title('Prediction')
-        plt.axis('off')
-        
-        plt.savefig(f"{output_path}/sample_epoch_{epoch}.png")
-        plt.close()
+        try:
+            # Get a sample batch
+            data, target = next(iter(data_loader))
+            if torch.cuda.is_available():
+                data, target = data.cuda(), target.cuda()
+            
+            # Forward pass
+            outputs = net(data, mode='full')
+            
+            # Take the first image in the batch
+            img = data[0].cpu().numpy()
+            img = np.transpose(img, (1, 2, 0))  # Convert from CxHxW to HxWxC
+            img = (img * 255).astype(np.uint8)  # Assuming data is normalized to [0, 1]
+            
+            gt = target[0].cpu().numpy()
+            
+            # Get final segmentation
+            pred = outputs['final_segmentation'][0].argmax(dim=0).cpu().numpy()
+            
+            # Visualize
+            plt.figure(figsize=(15, 5))
+            
+            plt.subplot(1, 3, 1)
+            plt.imshow(img)
+            plt.title('Input Image')
+            plt.axis('off')
+            
+            plt.subplot(1, 3, 2)
+            plt.imshow(convert_to_color(gt))
+            plt.title('Ground Truth')
+            plt.axis('off')
+            
+            plt.subplot(1, 3, 3)
+            plt.imshow(convert_to_color(pred))
+            plt.title('Prediction')
+            plt.axis('off')
+            
+            plt.savefig(f"{output_path}/sample_epoch_{epoch}.png")
+            plt.close()
+        except StopIteration:
+            print("No data available for visualization")
+        except Exception as e:
+            print(f"Error during visualization: {e}")

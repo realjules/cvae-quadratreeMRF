@@ -86,7 +86,7 @@ def main(args):
     labeled_percentage = args.labeled_percentage
     if labeled_percentage < 100:
         # Use only a subset of training data as labeled
-        num_labeled = int(len(train_ids) * labeled_percentage / 100)
+        num_labeled = max(1, int(len(train_ids) * labeled_percentage / 100))  # Ensure at least 1 labeled sample
         labeled_ids = train_ids[:num_labeled]
         unlabeled_ids = train_ids[num_labeled:]
         print(f"Using {len(labeled_ids)} tiles as labeled data: {labeled_ids}")
