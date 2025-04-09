@@ -2,6 +2,7 @@
 
 This repository implements a novel semi-supervised framework that combines contrastive learning with a hierarchical probabilistic graphical model (PGM) for semantic segmentation of remote sensing images. The approach integrates a contrastive variational autoencoder (CVAE) with a quadtree-based Markov random field (MRF) to achieve robust generalization with minimal labeled data.
 
+
 ![Architecture Overview](arch.PNG)
 
 ## Key Features
