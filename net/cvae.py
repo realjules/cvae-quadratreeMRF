@@ -65,7 +65,9 @@ class CVAE(nn.Module):
         
         # Decoder with skip connections
         hidden_dims.reverse()
-        self.decoder_input = nn.Linear(latent_dim, hidden_dims[0] * 8 * 8)
+        # Set a fixed spatial size that matches the adaptive pooling output
+        self.spatial_size = 8
+        self.decoder_input = nn.Linear(latent_dim, hidden_dims[0] * self.spatial_size * self.spatial_size)
         
         # Decoder blocks
         self.decoder_blocks = nn.ModuleList()
@@ -132,16 +134,16 @@ class CVAE(nn.Module):
         batch_size = z.size(0)
         result = self.decoder_input(z)
         
-        # Reshape to spatial volume
-        result = result.view(batch_size, self.hidden_dims[0], 8, 8)
+        # Use the fixed spatial size for reshaping
+        result = result.view(batch_size, self.hidden_dims[0], self.spatial_size, self.spatial_size)
         
         # Reverse encoder features for skip connections
         encoder_features = list(reversed(self.encoder_features))
         
         # Process through decoder blocks with skip connections
         for i, block in enumerate(self.decoder_blocks):
-            # Add skip connection if we're past the first block
-            if i > 0:
+            # Add skip connection if we're past the first block and have encoder features
+            if i > 0 and i < len(encoder_features):
                 # Resize encoder feature to match current size if needed
                 encoder_feature = encoder_features[i]
                 if encoder_feature.shape[2:] != result.shape[2:]:
