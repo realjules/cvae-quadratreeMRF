@@ -64,18 +64,6 @@ def main(args):
     optimizer = torch.optim.AdamW(net.parameters(), lr=base_lr, weight_decay=weight_decay, 
                                 betas=(0.9, 0.999), eps=1e-8)
     
-    # Use OneCycleLR scheduler for faster convergence
-    total_steps = args.epochs * (len(labeled_ids) + (len(unlabeled_ids) if unlabeled_ids else 0))
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, 
-        max_lr=base_lr,
-        total_steps=total_steps,
-        pct_start=0.3,  # Warm-up for 30% of training
-        anneal_strategy='cos',
-        div_factor=25.0,  # initial_lr = max_lr/25
-        final_div_factor=10000.0  # min_lr = initial_lr/10000
-    )
-    
     # Use GPU if available
     if torch.cuda.is_available():
         net.cuda()
@@ -138,6 +126,20 @@ def main(args):
     labeled_loader = torch.utils.data.DataLoader(labeled_set, batch_size)
     val_loader = torch.utils.data.DataLoader(val_set, batch_size)
     test_loader = torch.utils.data.DataLoader(test_set, batch_size)
+    
+    # Set up OneCycleLR scheduler now that we have all the dataset information
+    estimated_steps_per_epoch = 10000 // batch_size  # Based on the default 10000 samples per epoch
+    total_steps = args.epochs * estimated_steps_per_epoch
+    
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, 
+        max_lr=base_lr,
+        total_steps=total_steps,
+        pct_start=0.3,  # Warm-up for 30% of training
+        anneal_strategy='cos',
+        div_factor=25.0,  # initial_lr = max_lr/25
+        final_div_factor=1000.0  # min_lr = initial_lr/1000
+    )
     
     # Set up experiment name and output location
     experiment_name = args.experiment_name
