@@ -319,9 +319,18 @@ class EnhancedHierarchicalPGMLoss(nn.Module):
                 else:
                     original_input = targets  # This assumes targets is the input in unsupervised mode
                 
-                # Combine pixel-wise MSE with structural similarity loss
-                # Calculate MSE loss
-                mse_loss = F.mse_loss(outputs['reconstruction'], original_input)
+                # Get reconstruction and ensure same size as original
+                recon = outputs['reconstruction']
+                if recon.shape != original_input.shape:
+                    recon = F.interpolate(
+                        recon, 
+                        size=(original_input.shape[2], original_input.shape[3]),
+                        mode='bilinear',
+                        align_corners=False
+                    )
+                
+                # Calculate MSE loss with resized reconstruction
+                mse_loss = F.mse_loss(recon, original_input)
                 
                 # Extract image gradients for structure preservation
                 # Using Sobel operators to detect edges
@@ -333,7 +342,7 @@ class EnhancedHierarchicalPGMLoss(nn.Module):
                 # Calculate gradients for original and reconstructed images
                 pad = nn.ReplicationPad2d(1)
                 orig_padded = pad(original_input)
-                recon_padded = pad(outputs['reconstruction'])
+                recon_padded = pad(recon)  # Use the resized reconstruction
                 
                 # Apply Sobel operators
                 orig_grad_x = F.conv2d(orig_padded, sobel_x, groups=3)
