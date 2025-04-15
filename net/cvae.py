@@ -298,21 +298,22 @@ class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=256):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
+        self.d_model = d_model
         
-        # Create positional encoding matrix
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
+        # Create simplified positional encoding for latent vector
+        self.position_embedding = nn.Embedding(1, d_model)
         
         # Linear projection to combine with input
         self.fc = nn.Linear(d_model, d_model)
         
     def forward(self, x):
-        # Add positional encoding and apply dropout
-        pos_enc = self.pe[:, :x.size(1)]
-        x = x + 0.1 * pos_enc  # Scale down positional encoding contribution
+        # For latent vectors without sequence dimension
+        batch_size = x.size(0)
+        
+        # Generate position embedding (same for all samples in batch)
+        pos_emb = self.position_embedding(torch.zeros(1, dtype=torch.long, device=x.device))
+        pos_emb = pos_emb.expand(batch_size, self.d_model)
+        
+        # Add position embedding and apply projection
+        x = x + 0.1 * pos_emb  # Scale down positional contribution
         return self.dropout(self.fc(x))
