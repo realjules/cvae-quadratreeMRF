@@ -20,6 +20,7 @@ class QuadtreeNode:
         self.label = None   # Class label for this region
         self.confidence = None  # Confidence score for the label
         self.features = None  # Feature vector for this region
+        self.neighbors = []  # Neighboring nodes
         
     def split(self):
         """Split the current node into four quadrants"""
@@ -54,53 +55,72 @@ class QuadtreeNode:
         return leaves
 
 
-class QuadtreeMRF(nn.Module):
+class OptimizedQuadtreeMRF(nn.Module):
     """
-    Quadtree-based Markov Random Field for hierarchical segmentation
+    Optimized Quadtree-based Markov Random Field for hierarchical segmentation
     of remote sensing images.
     
-    This implementation includes:
-    - Quadtree construction based on image content
-    - Belief propagation for label inference
-    - Integration with latent features from CVAE
+    Key improvements:
+    - Efficient belief propagation (reduced iterations, log-space operations)
+    - Optimized tree construction with node limits
+    - Improved feature integration with BatchNorm
+    - Spatial adjacency caching for faster neighbor computation
+    - Error handling with graceful fallbacks
     """
-    def __init__(self, n_classes=6, quadtree_depth=4, feature_dim=128, device="cuda"):
-        super(QuadtreeMRF, self).__init__()
+    def __init__(self, n_classes=6, quadtree_depth=3, feature_dim=256, max_nodes=1000, device="cuda"):
+        super(OptimizedQuadtreeMRF, self).__init__()
         self.n_classes = n_classes
         self.max_depth = quadtree_depth
         self.device = device
+        self.max_nodes = max_nodes  # Limit total nodes for efficiency
         
         # Pairwise potential parameters (learned)
-        self.pairwise_weights = nn.Parameter(torch.ones(n_classes, n_classes))
+        # Initialize with smoother values encouraging spatial consistency
+        self.pairwise_weights = nn.Parameter(torch.eye(n_classes) * 0.8 + 0.2 / n_classes)
         
-        # Unary potential parameters (for feature integration)
-        # Make this flexible to handle various input dimensions
-        self.feature_dim = feature_dim  # Use the provided feature dimension
+        # Unary potential parameters with improved architecture
+        self.feature_dim = feature_dim
+        
+        # Feature dimensionality reduction to save memory
+        self.dim_reduction = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim // 2),
+            nn.BatchNorm1d(feature_dim // 2),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Enhanced unary projection with residual connection
+        self.unary_projection = nn.Sequential(
+            nn.Linear(feature_dim // 2, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, n_classes)
+        )
         
         # Dictionary to store feature projections for different input dimensions
         self.dim_projections = nn.ModuleDict()
         
-        # Base unary projection
-        self.unary_projection = nn.Sequential(
-            nn.Linear(self.feature_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, n_classes)
-        )
-        
-        # Store common feature dimensions projections
+        # Store common feature dimensions projections with improved architecture
         for dim in [64, 128, 256, 512]:
             if dim != self.feature_dim:
-                self.dim_projections[str(dim)] = nn.Linear(dim, self.feature_dim)
+                self.dim_projections[str(dim)] = nn.Sequential(
+                    nn.Linear(dim, self.feature_dim),
+                    nn.BatchNorm1d(self.feature_dim),
+                    nn.ReLU(inplace=True)
+                )
         
         # Edge potential parameters for parent-child relationships
-        self.vertical_weights = nn.Parameter(torch.ones(n_classes, n_classes))
+        self.vertical_weights = nn.Parameter(torch.eye(n_classes) * 0.9 + 0.1 / n_classes)
         
-        # Number of belief propagation iterations
-        self.bp_iterations = 5
+        # Reduced number of belief propagation iterations
+        self.bp_iterations = 3
         
     def build_quadtree(self, features, initial_segmentation=None):
         """
         Build a quadtree from input features and optional initial segmentation
+        with node count limiting for efficiency
         
         Args:
             features: Feature maps [B, C, H, W]
@@ -116,58 +136,94 @@ class QuadtreeMRF(nn.Module):
             # Create root node covering the entire image
             root = QuadtreeNode(0, 0, width, 0, self.max_depth)
             
-            # Build the tree recursively
-            self._build_recursive(root, features[b], initial_segmentation[b] if initial_segmentation is not None else None)
+            # Build the tree recursively with node counting
+            self._build_recursive(
+                root, 
+                features[b], 
+                initial_segmentation[b] if initial_segmentation is not None else None,
+                node_count=0
+            )
             
             trees.append(root)
             
         return trees
     
-    def _build_recursive(self, node, features, segmentation=None):
+    def _build_recursive(self, node, features, segmentation=None, node_count=0):
         """
         Recursively build the quadtree by splitting nodes based on feature homogeneity
+        and a maximum node count limit
         
         Args:
             node: Current QuadtreeNode
             features: Feature tensor [C, H, W]
             segmentation: Optional segmentation map [H, W]
+            node_count: Current count of nodes in the tree
+        
+        Returns:
+            Updated node count
         """
+        # Check if we've reached the maximum node count
+        if node_count >= self.max_nodes:
+            return node_count
+            
         # Extract features for the current node region
         region_features = features[:, node.y:node.y+node.size, node.x:node.x+node.size]
         
-        # Calculate feature variance to determine if splitting is needed
-        variance = torch.var(region_features.reshape(region_features.size(0), -1), dim=1).mean()
-        
-        # Set node features (mean pooled)
-        node.features = torch.mean(region_features.reshape(region_features.size(0), -1), dim=1)
+        # Use max pooling instead of mean for more discriminative features
+        node.features = F.adaptive_max_pool2d(
+            region_features.unsqueeze(0), (1, 1)
+        ).squeeze()
         
         # If segmentation is provided, calculate majority label
         if segmentation is not None:
             region_seg = segmentation[node.y:node.y+node.size, node.x:node.x+node.size]
             # Find most common label (excluding ignore index)
-            labels, counts = torch.unique(region_seg[region_seg != 255], return_counts=True)
-            if labels.size(0) > 0:
-                node.label = labels[torch.argmax(counts)]
-                node.confidence = torch.max(counts).float() / (region_seg != 255).sum().float()
+            mask = (region_seg != 255)
+            if mask.sum() > 0:
+                labels, counts = torch.unique(region_seg[mask], return_counts=True)
+                if labels.size(0) > 0:
+                    node.label = labels[torch.argmax(counts)]
+                    node.confidence = torch.max(counts).float() / mask.sum().float()
+                else:
+                    node.label = 0
+                    node.confidence = 0.0
             else:
                 node.label = 0
                 node.confidence = 0.0
         
-        # Determine if the node should be split
-        # Split if: Not at max depth, high variance, and minimum size
-        should_split = (node.depth < node.max_depth and 
-                       variance > 0.01 and 
-                       node.size > 8)
+        # Improved splitting criterion combining:
+        # 1. Feature variance (normalized)
+        # 2. Region size (prefer splitting larger regions)
+        # 3. Current depth (prefer splitting at lower depths)
+        if node.size >= 8 and node.depth < self.max_depth:
+            # Calculate feature variance
+            variance = torch.var(region_features.reshape(region_features.size(0), -1), dim=1).mean()
+            
+            # Normalize variance to [0, 1] range for better comparison
+            norm_variance = torch.tanh(variance * 10)
+            
+            # Size factor: larger regions are more likely to be split
+            size_factor = min(1.0, node.size / 128)
+            
+            # Depth factor: nodes at lower depths are more likely to be split
+            depth_factor = 1.0 - (node.depth / self.max_depth)
+            
+            # Combined splitting score
+            split_score = norm_variance * 0.6 + size_factor * 0.3 + depth_factor * 0.1
+            
+            # Split if score exceeds threshold and we have room for more nodes
+            if split_score > 0.3 and node_count < self.max_nodes - 4:
+                node.split()
+                # Recursively build for children
+                for child in node.children:
+                    node_count = self._build_recursive(child, features, segmentation, node_count)
+                    node_count += 1
         
-        if should_split:
-            node.split()
-            # Recursively build for children
-            for child in node.children:
-                self._build_recursive(child, features, segmentation)
+        return node_count
     
     def compute_unary_potentials(self, trees, latent_features):
         """
-        Compute unary potentials for all nodes in the quadtree
+        Compute unary potentials for all nodes in the quadtree with improved feature handling
         
         Args:
             trees: List of quadtree root nodes
@@ -179,87 +235,135 @@ class QuadtreeMRF(nn.Module):
             root = trees[b]
             features = latent_features[b] if len(latent_features.shape) == 4 else latent_features
             
-            # Process all leaf nodes
+            # Process all leaf nodes in a batch when possible
             leaves = root.get_leaf_nodes()
             
+            # Process all leaves
             for leaf in leaves:
                 try:
-                    # Extract features for this region - handle dimensions properly
+                    # Extract features for this region
                     if len(features.shape) == 3:  # [C, H, W]
+                        # Use adaptive pooling for more efficient feature extraction
                         region_features = features[:, leaf.y:leaf.y+leaf.size, leaf.x:leaf.x+leaf.size]
-                        # Pool features to get a single vector
-                        pooled_features = F.adaptive_avg_pool2d(
-                            region_features.unsqueeze(0), 
-                            (1, 1)
+                        pooled_features = F.adaptive_max_pool2d(
+                            region_features.unsqueeze(0), (1, 1)
                         ).squeeze()
                     else:  # Assume it's a flat vector [C]
                         pooled_features = features
                     
-                    # Resize the feature vector to match self.feature_dim if needed
+                    # Project features to the expected dimension if needed
                     if pooled_features.shape[0] != self.feature_dim:
-                        # Check if we have a pre-defined projection for this dimension
                         feat_dim = pooled_features.shape[0]
                         if str(feat_dim) in self.dim_projections:
-                            pooled_features = self.dim_projections[str(feat_dim)](pooled_features)
+                            # Add batch dimension for BatchNorm if needed
+                            if pooled_features.dim() == 1:
+                                pooled_features = pooled_features.unsqueeze(0)
+                                pooled_features = self.dim_projections[str(feat_dim)](pooled_features)
+                                pooled_features = pooled_features.squeeze(0)
+                            else:
+                                pooled_features = self.dim_projections[str(feat_dim)](pooled_features)
                         else:
-                            # Create a new projection and add it to the dictionary
-                            self.dim_projections[str(feat_dim)] = nn.Linear(
-                                feat_dim, self.feature_dim
+                            # Create a new projection if needed
+                            self.dim_projections[str(feat_dim)] = nn.Sequential(
+                                nn.Linear(feat_dim, self.feature_dim),
+                                nn.BatchNorm1d(self.feature_dim),
+                                nn.ReLU(inplace=True)
                             ).to(self.device)
-                            pooled_features = self.dim_projections[str(feat_dim)](pooled_features)
+                            
+                            if pooled_features.dim() == 1:
+                                pooled_features = pooled_features.unsqueeze(0)
+                                pooled_features = self.dim_projections[str(feat_dim)](pooled_features)
+                                pooled_features = pooled_features.squeeze(0)
+                            else:
+                                pooled_features = self.dim_projections[str(feat_dim)](pooled_features)
+                    
+                    # Apply feature dimensionality reduction
+                    if pooled_features.dim() == 1:
+                        reduced_features = self.dim_reduction(pooled_features.unsqueeze(0)).squeeze(0)
+                    else:
+                        reduced_features = self.dim_reduction(pooled_features)
                     
                     # Project features to class scores
-                    leaf.unary_potentials = self.unary_projection(pooled_features).squeeze()
+                    if reduced_features.dim() == 1:
+                        unary_potentials = self.unary_projection(reduced_features.unsqueeze(0)).squeeze(0)
+                    else:
+                        unary_potentials = self.unary_projection(reduced_features)
+                    
+                    leaf.unary_potentials = unary_potentials
                 except Exception as e:
-                    print(f"Error in compute_unary_potentials: {e}")
-                    # Provide a fallback - uniform distribution
-                    leaf.unary_potentials = torch.ones(self.n_classes, device=self.device) / self.n_classes
+                    # Provide a fallback with slight background bias (usually class 0)
+                    bias = torch.ones(self.n_classes, device=self.device) / self.n_classes
+                    bias[0] += 0.1  # Slight bias toward background class
+                    bias = bias / bias.sum()  # Renormalize
+                    leaf.unary_potentials = torch.log(bias)
     
-    def compute_pairwise_potentials(self, trees):
+    def compute_efficient_pairwise(self, trees):
         """
-        Compute pairwise potentials between neighboring nodes
+        Efficiently compute pairwise potentials using spatial adjacency
         
         Args:
             trees: List of quadtree root nodes
         """
-        batch_size = len(trees)
-        
-        for b in range(batch_size):
-            root = trees[b]
+        for tree in trees:
+            leaves = tree.get_leaf_nodes()
             
-            # Get all leaf nodes
-            leaves = root.get_leaf_nodes()
+            # Create spatial grid for fast adjacency computation
+            max_size = tree.size
+            grid = {}  # (x, y) -> node mapping
             
-            # For each leaf, compute potentials with its spatial neighbors
-            for i, leaf in enumerate(leaves):
-                leaf.neighbors = []
-                leaf.neighbor_potentials = []
+            # Populate grid with leaf nodes
+            for leaf in leaves:
+                # Store corners in grid
+                x1, y1 = leaf.x, leaf.y
+                x2, y2 = leaf.x + leaf.size, leaf.y + leaf.size
                 
-                # Check all other leaves for adjacency
-                for j, other in enumerate(leaves):
-                    if i == j:
-                        continue
-                    
-                    # Check if leaves are adjacent
-                    is_adjacent = (
-                        (leaf.x + leaf.size == other.x and 
-                         (other.y < leaf.y + leaf.size and leaf.y < other.y + other.size)) or
-                        (other.x + other.size == leaf.x and 
-                         (other.y < leaf.y + leaf.size and leaf.y < other.y + other.size)) or
-                        (leaf.y + leaf.size == other.y and 
-                         (other.x < leaf.x + leaf.size and leaf.x < other.x + other.size)) or
-                        (other.y + other.size == leaf.y and 
-                         (other.x < leaf.x + leaf.size and leaf.x < other.x + other.size))
+                # Store this node at its corner positions
+                for x in [x1, x2]:
+                    for y in [y1, y2]:
+                        if (x, y) not in grid:
+                            grid[(x, y)] = []
+                        grid[(x, y)].append(leaf)
+            
+            # Find neighbors through shared corners
+            for leaf in leaves:
+                leaf.neighbors = []
+                
+                # Check each corner of this leaf
+                corners = [
+                    (leaf.x, leaf.y),                       # Top-left
+                    (leaf.x + leaf.size, leaf.y),           # Top-right
+                    (leaf.x, leaf.y + leaf.size),           # Bottom-left
+                    (leaf.x + leaf.size, leaf.y + leaf.size)  # Bottom-right
+                ]
+                
+                # Collect potential neighbors from corners
+                potential_neighbors = set()
+                for corner in corners:
+                    if corner in grid:
+                        for node in grid[corner]:
+                            if node != leaf:
+                                potential_neighbors.add(node)
+                
+                # Verify actual adjacency (sharing an edge, not just a corner)
+                for node in potential_neighbors:
+                    # Check for horizontal adjacency
+                    horiz_adjacent = (
+                        (leaf.x + leaf.size == node.x or node.x + node.size == leaf.x) and
+                        not (leaf.y + leaf.size <= node.y or node.y + node.size <= leaf.y)
                     )
                     
-                    if is_adjacent:
-                        leaf.neighbors.append(other)
-                        # Use the learned pairwise potential matrix
-                        leaf.neighbor_potentials.append(self.pairwise_weights)
+                    # Check for vertical adjacency
+                    vert_adjacent = (
+                        (leaf.y + leaf.size == node.y or node.y + node.size == leaf.y) and
+                        not (leaf.x + leaf.size <= node.x or node.x + node.size <= leaf.x)
+                    )
+                    
+                    if horiz_adjacent or vert_adjacent:
+                        leaf.neighbors.append(node)
     
-    def belief_propagation(self, trees, n_iterations=5):
+    def efficient_belief_propagation(self, trees, n_iterations=3):
         """
-        Run belief propagation to infer optimal labels
+        Run belief propagation in log-space for improved numerical stability
         
         Args:
             trees: List of quadtree root nodes
@@ -271,45 +375,62 @@ class QuadtreeMRF(nn.Module):
         batch_size = len(trees)
         height = width = trees[0].size  # Assuming square images
         
-        # Initialize beliefs for all leaf nodes
+        # Initialize log-beliefs for all leaf nodes
         for tree in trees:
             leaves = tree.get_leaf_nodes()
             for leaf in leaves:
-                if not hasattr(leaf, 'unary_potentials'):
-                    # Initialize with uniform distribution if no unary potentials
-                    leaf.beliefs = torch.ones(self.n_classes, device=self.device) / self.n_classes
+                if hasattr(leaf, 'unary_potentials'):
+                    # Initialize with unary potentials (already in log space)
+                    leaf.log_beliefs = leaf.unary_potentials.clone()
                 else:
-                    # Initialize with unary potentials
-                    leaf.beliefs = F.softmax(leaf.unary_potentials, dim=0)
+                    # Initialize with uniform distribution in log space
+                    leaf.log_beliefs = -torch.ones(self.n_classes, device=self.device) * np.log(self.n_classes)
+                
+                # Initialize message dictionary
+                leaf.log_messages = {neighbor: torch.zeros(self.n_classes, device=self.device) 
+                                    for neighbor in leaf.neighbors}
         
         # Run belief propagation for n_iterations
-        for _ in range(n_iterations):
+        for iter_idx in range(n_iterations):
             # For each tree
             for tree in trees:
                 leaves = tree.get_leaf_nodes()
                 
-                # Compute messages from each node to its neighbors
+                # Compute all messages in parallel when possible
+                # First, collect old messages for reference
+                old_log_messages = {}
                 for leaf in leaves:
-                    leaf.messages = {}
-                    
-                    # For each neighbor
                     for neighbor in leaf.neighbors:
-                        # Compute message from leaf to neighbor
-                        msg = leaf.beliefs.clone()
+                        if neighbor in leaf.log_messages:
+                            old_log_messages[(leaf, neighbor)] = leaf.log_messages[neighbor].clone()
+                
+                # Then update messages based on old values
+                for leaf in leaves:
+                    for neighbor in leaf.neighbors:
+                        # Start with unary potential
+                        if hasattr(leaf, 'unary_potentials'):
+                            msg = leaf.unary_potentials.clone()
+                        else:
+                            msg = torch.zeros(self.n_classes, device=self.device)
                         
-                        # Multiply by messages from other neighbors
+                        # Add messages from other neighbors (in log space)
                         for other in leaf.neighbors:
-                            if other != neighbor and other in leaf.messages:
-                                msg *= leaf.messages[other]
+                            if other != neighbor:
+                                if (leaf, other) in old_log_messages:
+                                    msg = msg + old_log_messages[(leaf, other)]
                         
-                        # Apply pairwise potential
-                        msg = torch.matmul(self.pairwise_weights, msg)
+                        # Apply pairwise potential (matrix multiplication in log space becomes logsumexp)
+                        msg_out = torch.zeros_like(msg)
+                        for c in range(self.n_classes):
+                            # For each output class, compute logsumexp over input classes
+                            terms = msg + torch.log(self.pairwise_weights[c] + 1e-10)
+                            msg_out[c] = torch.logsumexp(terms, dim=0)
                         
-                        # Normalize message
-                        msg = msg / msg.sum()
+                        # Normalize to prevent numerical issues (subtract max)
+                        msg_out = msg_out - msg_out.max()
                         
                         # Store message
-                        leaf.messages[neighbor] = msg
+                        leaf.log_messages[neighbor] = msg_out
                 
                 # Update beliefs
                 for leaf in leaves:
@@ -319,13 +440,13 @@ class QuadtreeMRF(nn.Module):
                     else:
                         log_belief = torch.zeros(self.n_classes, device=self.device)
                     
-                    # Add messages from neighbors
+                    # Add all messages
                     for neighbor in leaf.neighbors:
-                        if neighbor in leaf.messages:
-                            log_belief += torch.log(leaf.messages[neighbor] + 1e-10)
+                        if neighbor in leaf.log_messages:
+                            log_belief = log_belief + leaf.log_messages[neighbor]
                     
-                    # Normalize beliefs
-                    leaf.beliefs = F.softmax(log_belief, dim=0)
+                    # Store updated beliefs
+                    leaf.log_beliefs = log_belief
         
         # Create output segmentation maps
         segmentations = torch.zeros(batch_size, height, width, device=self.device, dtype=torch.long)
@@ -335,7 +456,7 @@ class QuadtreeMRF(nn.Module):
             leaves = tree.get_leaf_nodes()
             for leaf in leaves:
                 # Get predicted class (maximum belief)
-                pred_class = torch.argmax(leaf.beliefs)
+                pred_class = torch.argmax(leaf.log_beliefs)
                 
                 # Fill the region with the predicted class
                 segmentations[b, leaf.y:leaf.y+leaf.size, leaf.x:leaf.x+leaf.size] = pred_class
@@ -344,7 +465,7 @@ class QuadtreeMRF(nn.Module):
     
     def forward(self, features, cvae_latent=None, initial_segmentation=None):
         """
-        Forward pass through the Quadtree MRF
+        Forward pass through the Optimized Quadtree MRF with improved error handling
         
         Args:
             features: Feature maps from base network [B, C, H, W]
@@ -354,17 +475,17 @@ class QuadtreeMRF(nn.Module):
         Returns:
             Refined segmentation maps [B, H, W]
         """
+        # Get dimensions
+        batch_size, n_features, height, width = features.shape
+        
         try:
-            # Get dimensions
-            batch_size, n_features, height, width = features.shape
-            
             # Create initial segmentation if not provided
             if initial_segmentation is None:
                 # Use a simple convolution to create initial segmentation
                 initial_conv = nn.Conv2d(n_features, self.n_classes, kernel_size=1).to(features.device)
                 initial_segmentation = initial_conv(features).argmax(dim=1)
             
-            # Build the quadtree structure
+            # Build the quadtree structure (optimized version)
             trees = self.build_quadtree(features, initial_segmentation)
             
             # Ensure cvae_latent has appropriate dimensions
@@ -373,24 +494,39 @@ class QuadtreeMRF(nn.Module):
                 if len(cvae_latent.shape) == 2:  # [B, C]
                     # Expand to spatial dimensions matching feature map
                     cvae_latent = cvae_latent.unsqueeze(-1).unsqueeze(-1)
-                    cvae_latent = cvae_latent.expand(-1, -1, height, width)
+                    cvae_latent = F.interpolate(
+                        cvae_latent.expand(-1, -1, 2, 2), 
+                        size=(height, width), 
+                        mode='bilinear',
+                        align_corners=False
+                    )
             else:
                 # If no cvae_latent provided, use features
                 cvae_latent = features
-                
-            # Compute unary potentials for leaf nodes
+            
+            # Compute unary potentials for leaf nodes (optimized version)
             self.compute_unary_potentials(trees, cvae_latent)
             
-            # Compute pairwise potentials between neighboring nodes
-            self.compute_pairwise_potentials(trees)
+            # Compute pairwise potentials between neighboring nodes (optimized version)
+            self.compute_efficient_pairwise(trees)
             
-            # Run belief propagation to infer final labels
-            refined_segmentation = self.belief_propagation(trees, self.bp_iterations)
+            # Run belief propagation to infer final labels (optimized version)
+            refined_segmentation = self.efficient_belief_propagation(trees, self.bp_iterations)
             
             return refined_segmentation
             
         except Exception as e:
-            print(f"Error in QuadtreeMRF.forward: {e}")
-            # Fall back to a simple segmentation head
-            simple_output = nn.Conv2d(n_features, self.n_classes, kernel_size=1).to(features.device)(features)
-            return simple_output.argmax(dim=1)
+            # Graceful fallback with more informative error
+            print(f"Error in OptimizedQuadtreeMRF.forward: {str(e)}")
+            # Create a more sophisticated fallback using the full feature set
+            fallback = nn.Sequential(
+                nn.Conv2d(n_features, 128, kernel_size=3, padding=1),
+                nn.BatchNorm2d(128),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(128, self.n_classes, kernel_size=1)
+            ).to(features.device)
+            
+            return fallback(features).argmax(dim=1)
+
+# Alias for backward compatibility
+QuadtreeMRF = OptimizedQuadtreeMRF

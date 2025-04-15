@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Training function for Semi-Supervised Hierarchical PGM with Contrastive Learning
+Enhanced Training function for Semi-Supervised Hierarchical PGM with Contrastive Learning
 """
 
 import torch
@@ -11,6 +11,8 @@ import os
 from torch.autograd import Variable
 from utils.utils_dataset import convert_to_color
 from utils.utils import accuracy
+from torch.cuda.amp import autocast, GradScaler
+import time
 
 
 def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader, 
@@ -50,6 +52,9 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
     # Create output directory if it doesn't exist
     os.makedirs(output_path, exist_ok=True)
     
+    # Initialize mixed precision training
+    scaler = GradScaler()
+    
     # Loss tracking
     epoch_losses = []
     epoch_val_losses = []
@@ -70,6 +75,11 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
     
     # Track best validation accuracy
     best_val_acc = 0.0
+    
+    # Early stopping
+    patience = 10
+    early_stop_counter = 0
+    prev_val_loss = float('inf')
     
     # Use tqdm only for epoch-level progress, not batch-level
     for e in tqdm(range(1, epochs + 1), desc="Epochs"):
@@ -93,14 +103,16 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
                 
                 optimizer.zero_grad()
                 
-                # Forward pass with labeled data (supervised mode)
-                outputs = net(data, mode='full')
+                # Mixed precision forward pass with labeled data
+                with autocast():
+                    # Forward pass with labeled data (supervised mode)
+                    outputs = net(data, mode='full')
+                    
+                    # Calculate loss
+                    loss, loss_components = criterion(outputs, target, mode='full')
                 
-                # Calculate loss
-                loss, loss_components = criterion(outputs, target, mode='full')
-                
-                # Backward pass
-                loss.backward()
+                # Backward pass with gradient scaling
+                scaler.scale(loss).backward()
                 
                 # Calculate gradient norm for debugging
                 total_norm = 0
@@ -111,10 +123,13 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
                 total_norm = total_norm ** 0.5
                 grad_norms.append(total_norm)
                 
-                # Gradient clipping to prevent exploding gradients
-                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=10.0)
+                # Gradient clipping with stricter limit to prevent exploding gradients
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
                 
-                optimizer.step()
+                # Update with gradient scaling
+                scaler.step(optimizer)
+                scaler.update()
                 
                 # Record loss for this batch
                 epoch_supervised_losses.append(loss.item())
@@ -136,19 +151,24 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
                 
                 optimizer.zero_grad()
                 
-                # Forward pass with unlabeled data (unsupervised mode)
-                outputs = net(data, mode='unsupervised')
+                # Mixed precision forward pass with unlabeled data
+                with autocast():
+                    # Forward pass with unlabeled data (unsupervised mode)
+                    outputs = net(data, mode='unsupervised')
+                    
+                    # Calculate unsupervised loss
+                    loss, loss_components = criterion(outputs, targets=None, mode='unsupervised')
                 
-                # Calculate unsupervised loss
-                loss, loss_components = criterion(outputs, targets=None, mode='unsupervised')
+                # Backward pass with gradient scaling
+                scaler.scale(loss).backward()
                 
-                # Backward pass
-                loss.backward()
+                # Gradient clipping with stricter limit to prevent exploding gradients
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
                 
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=10.0)
-                
-                optimizer.step()
+                # Update with gradient scaling
+                scaler.step(optimizer)
+                scaler.update()
                 
                 # Record loss for this batch
                 epoch_unsupervised_losses.append(loss.item())
@@ -182,6 +202,18 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
                 best_val_acc = val_acc
                 torch.save(net.state_dict(), f'{output_path}/model_best.pth')
                 print(f"New best model saved with validation accuracy: {best_val_acc:.2f}%")
+                early_stop_counter = 0  # Reset early stopping counter
+            else:
+                early_stop_counter += 1
+                
+            # Early stopping check
+            if early_stop_counter >= patience:
+                print(f"Early stopping triggered after {patience} epochs without improvement")
+                break
+                
+            # Update loss weights based on current epoch
+            if hasattr(criterion, 'update_epoch'):
+                criterion.update_epoch(e, epochs)
         else:
             # If no validation data, just use training loss
             val_loss = avg_epoch_loss
@@ -216,7 +248,7 @@ def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader
 
 def validate(net, criterion, val_loader):
     """
-    Validate the model on the validation set
+    Validate the model on the validation set with mixed precision
     
     Parameters:
     -----------
@@ -237,6 +269,7 @@ def validate(net, criterion, val_loader):
     net.eval()
     val_loss = 0.0
     val_acc = 0.0
+    val_iou = 0.0
     num_batches = 0
     
     with torch.no_grad():
@@ -244,31 +277,87 @@ def validate(net, criterion, val_loader):
             if torch.cuda.is_available():
                 data, target = data.cuda(), target.cuda()
             
-            # Forward pass in inference mode
-            outputs = net(data, mode='inference')
+            # Use mixed precision for validation as well
+            with autocast():
+                # Forward pass in inference mode
+                outputs = net(data, mode='inference')
+                
+                # Calculate loss
+                loss, _ = criterion(outputs, target, mode='supervised')
             
-            # Calculate loss
-            loss, _ = criterion(outputs, target, mode='supervised')
             val_loss += loss.item()
             
-            # Calculate accuracy
+            # Calculate accuracy and IoU
             pred = outputs['final_segmentation'].argmax(dim=1).cpu().numpy()
             target_np = target.cpu().numpy()
             
-            # Calculate batch accuracy
+            # Calculate batch accuracy and IoU
             batch_acc = 0
+            batch_iou = 0
             for i in range(len(pred)):
                 batch_acc += accuracy(pred[i], target_np[i])
+                batch_iou += calculate_miou(pred[i], target_np[i], n_classes=outputs['final_segmentation'].size(1))
+            
             batch_acc /= len(pred)
+            batch_iou /= len(pred)
             
             val_acc += batch_acc
+            val_iou += batch_iou
             num_batches += 1
     
     # Calculate averages
     avg_val_loss = val_loss / num_batches if num_batches > 0 else 0
     avg_val_acc = val_acc / num_batches if num_batches > 0 else 0
+    avg_val_iou = val_iou / num_batches if num_batches > 0 else 0
+    
+    print(f"Validation IoU: {avg_val_iou:.4f}")
     
     return avg_val_loss, avg_val_acc
+
+def calculate_miou(pred, target, n_classes=6, ignore_index=6):
+    """
+    Calculate mean IoU for evaluation
+    
+    Parameters:
+    -----------
+    pred: numpy array
+        Prediction mask
+    target: numpy array
+        Ground truth mask
+    n_classes: int
+        Number of classes
+    ignore_index: int
+        Index to ignore in calculation
+        
+    Returns:
+    --------
+    miou: float
+        Mean IoU score
+    """
+    ious = []
+    
+    # Calculate IoU for each class
+    for cls in range(n_classes):
+        if cls == ignore_index:
+            continue
+            
+        pred_mask = (pred == cls)
+        target_mask = (target == cls)
+        
+        # Skip if class is not present in ground truth
+        if target_mask.sum() == 0:
+            continue
+            
+        # Calculate intersection and union
+        intersection = (pred_mask & target_mask).sum()
+        union = (pred_mask | target_mask).sum()
+        
+        # Calculate IoU
+        iou = intersection / union if union > 0 else 0
+        ious.append(iou)
+    
+    # Return mean IoU
+    return sum(ious) / len(ious) if ious else 0
 
 
 def plot_training_curves(train_losses, val_losses, val_acc, component_losses, grad_norms, output_path):

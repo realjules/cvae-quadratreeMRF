@@ -3,11 +3,15 @@
 Created on Sun Apr  3 17:37:47 2022
 
 @author: marti
+Enhanced with additional data augmentation for improved model training
 """
 
 import numpy as np
 import random
+import torch
+import torchvision.transforms as transforms
 from scipy import ndimage
+from scipy.ndimage import map_coordinates
 from skimage.morphology import erosion, disk
 
 # ISPRS standard color palette
@@ -70,3 +74,111 @@ def conn_comp(gt, kernel): # taking the GT already converted in 1 channel
             new_gt[np.where(labeled==n)] = i  # give back the right class number to the saved connected components
 
     return new_gt
+    
+# Enhanced augmentation functions for improving training
+def get_augmentation_transforms(p=0.5):
+    """
+    Create a set of image augmentation transforms with probability p
+    """
+    color_jitter = transforms.ColorJitter(
+        brightness=0.2,
+        contrast=0.2,
+        saturation=0.2,
+        hue=0.1
+    )
+    
+    # Only apply to image, not mask
+    image_transforms = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.RandomApply([color_jitter], p=p),
+        transforms.RandomGrayscale(p=0.1),
+        transforms.ToTensor()
+    ])
+    
+    return image_transforms
+
+def elastic_transform(image, mask, alpha=50, sigma=5):
+    """
+    Apply elastic transform to image and mask simultaneously
+    """
+    # Get image dimensions
+    if isinstance(image, torch.Tensor):
+        image_np = image.permute(1, 2, 0).cpu().numpy()
+    else:
+        image_np = image.transpose(1, 2, 0)
+    
+    if isinstance(mask, torch.Tensor):
+        mask_np = mask.cpu().numpy()
+    else:
+        mask_np = mask
+    
+    height, width = image_np.shape[:2]
+    
+    # Create displacement field
+    dx = np.random.rand(height, width) * 2 - 1
+    dy = np.random.rand(height, width) * 2 - 1
+    
+    # Smooth displacement field
+    from scipy.ndimage import gaussian_filter
+    dx = gaussian_filter(dx, sigma) * alpha
+    dy = gaussian_filter(dy, sigma) * alpha
+    
+    # Create meshgrid for sampling
+    x, y = np.meshgrid(np.arange(width), np.arange(height))
+    indices = np.reshape(y + dy, (-1, 1)), np.reshape(x + dx, (-1, 1))
+    
+    # Apply transform to image and mask
+    distorted_image = np.zeros_like(image_np)
+    for c in range(image_np.shape[2]):
+        distorted_image[:, :, c] = map_coordinates(image_np[:, :, c], indices, order=1).reshape(height, width)
+    
+    distorted_mask = map_coordinates(mask_np, indices, order=0).reshape(height, width)
+    
+    # Convert back to original format
+    if isinstance(image, torch.Tensor):
+        distorted_image = torch.from_numpy(distorted_image.transpose(2, 0, 1))
+    else:
+        distorted_image = distorted_image.transpose(2, 0, 1)
+    
+    if isinstance(mask, torch.Tensor):
+        distorted_mask = torch.from_numpy(distorted_mask)
+    
+    return distorted_image, distorted_mask
+
+def cutmix_augmentation(image1, mask1, image2, mask2, alpha=0.5):
+    """
+    Apply CutMix augmentation between two images and their masks
+    """
+    # Ensure tensors
+    if not isinstance(image1, torch.Tensor):
+        image1 = torch.from_numpy(image1)
+    if not isinstance(mask1, torch.Tensor):
+        mask1 = torch.from_numpy(mask1)
+    if not isinstance(image2, torch.Tensor):
+        image2 = torch.from_numpy(image2)
+    if not isinstance(mask2, torch.Tensor):
+        mask2 = torch.from_numpy(mask2)
+    
+    # Get dimensions
+    _, h, w = image1.shape
+    
+    # Generate random box
+    r_x = random.randint(0, w)
+    r_y = random.randint(0, h)
+    r_w = random.randint(1, w - r_x)
+    r_h = random.randint(1, h - r_y)
+    
+    # Create box
+    x1 = r_x
+    y1 = r_y
+    x2 = r_x + r_w
+    y2 = r_y + r_h
+    
+    # Apply mixing
+    mixed_image = image1.clone()
+    mixed_mask = mask1.clone()
+    
+    mixed_image[:, y1:y2, x1:x2] = image2[:, y1:y2, x1:x2]
+    mixed_mask[y1:y2, x1:x2] = mask2[y1:y2, x1:x2]
+    
+    return mixed_image, mixed_mask

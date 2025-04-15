@@ -56,12 +56,25 @@ def main(args):
                                     contrastive_weight=args.contrastive_weight,
                                     consistency_weight=args.consistency_weight)
     
-    # Set up optimizer
+    # Set up optimizer with improved parameters
     base_lr = args.base_lr
-    optimizer = torch.optim.Adam(net.parameters(), lr=base_lr, weight_decay=0.0005)
+    weight_decay = 0.0001  # Reduced weight decay
     
-    # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [25, 35, 45], gamma=0.1)
+    # Use AdamW optimizer with decoupled weight decay
+    optimizer = torch.optim.AdamW(net.parameters(), lr=base_lr, weight_decay=weight_decay, 
+                                betas=(0.9, 0.999), eps=1e-8)
+    
+    # Use OneCycleLR scheduler for faster convergence
+    total_steps = args.epochs * (len(labeled_ids) + (len(unlabeled_ids) if unlabeled_ids else 0))
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, 
+        max_lr=base_lr,
+        total_steps=total_steps,
+        pct_start=0.3,  # Warm-up for 30% of training
+        anneal_strategy='cos',
+        div_factor=25.0,  # initial_lr = max_lr/25
+        final_div_factor=10000.0  # min_lr = initial_lr/10000
+    )
     
     # Use GPU if available
     if torch.cuda.is_available():
