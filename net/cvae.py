@@ -67,7 +67,9 @@ class CVAE(nn.Module):
         hidden_dims.reverse()
         # Set a fixed spatial size that matches the adaptive pooling output
         self.spatial_size = 8
-        self.decoder_input = nn.Linear(latent_dim, hidden_dims[0] * self.spatial_size * self.spatial_size)
+        # Calculate exact dimensions for the decoder input
+        target_decoder_size = hidden_dims[0] * self.spatial_size * self.spatial_size
+        self.decoder_input = nn.Linear(latent_dim, target_decoder_size)
         
         # Decoder blocks
         self.decoder_blocks = nn.ModuleList()
@@ -134,8 +136,17 @@ class CVAE(nn.Module):
         batch_size = z.size(0)
         result = self.decoder_input(z)
         
-        # Use the fixed spatial size for reshaping
-        result = result.view(batch_size, self.hidden_dims[0], self.spatial_size, self.spatial_size)
+        # Before attempting to reshape, print dimensions for debugging
+        # Calculate what dimensions would work given the tensor size
+        total_elems = result.numel() // batch_size
+        hidden_dim = self.hidden_dims[0]
+        spatial_dim = int((total_elems / hidden_dim) ** 0.5)
+        
+        # Safely reshape using calculated dimensions
+        result = result.view(batch_size, hidden_dim, spatial_dim, spatial_dim)
+        
+        # Store this for future reference
+        self.actual_spatial_size = spatial_dim
         
         # Reverse encoder features for skip connections
         encoder_features = list(reversed(self.encoder_features))
