@@ -4,189 +4,128 @@ import torch.nn.functional as F
 
 class CVAE(nn.Module):
     """
-    Enhanced Contrastive Variational Autoencoder for learning discriminative latent representations
-    from unlabeled remote sensing imagery. This implementation includes both the standard
-    VAE components and contrastive learning mechanisms, with improved architecture for
-    better performance.
+    Simplified Contrastive Variational Autoencoder with predictable dimensions
     """
     def __init__(self, input_channels=3, latent_dim=256, hidden_dims=[32, 64, 128, 256]):
         super(CVAE, self).__init__()
         self.latent_dim = latent_dim
         self.hidden_dims = hidden_dims.copy()  # Create a copy to avoid in-place modification
         
-        # Store encoder feature maps for skip connections
-        self.encoder_features = []
-        
         # Encoder
-        self.encoder_blocks = nn.ModuleList()
+        modules = []
         in_channels = input_channels
         
-        # Build encoder with spatial attention
-        for i, h_dim in enumerate(hidden_dims):
-            self.encoder_blocks.append(
+        # Build encoder
+        for h_dim in hidden_dims:
+            modules.append(
                 nn.Sequential(
                     nn.Conv2d(in_channels, h_dim, kernel_size=3, stride=2, padding=1),
-                    nn.InstanceNorm2d(h_dim),  # Instance norm for better stability
-                    nn.LeakyReLU(),
-                    nn.Conv2d(h_dim, h_dim, kernel_size=3, padding=1),  # Additional conv for more capacity
-                    nn.InstanceNorm2d(h_dim),
+                    nn.BatchNorm2d(h_dim),
                     nn.LeakyReLU()
                 )
             )
-            # Add spatial attention after each encoder block except the first
-            if i > 0:
-                self.encoder_blocks[-1].add_module(
-                    "attention", 
-                    SpatialAttention(h_dim)
-                )
             in_channels = h_dim
+            
+        self.encoder = nn.Sequential(*modules)
         
-        # Adaptive pooling for flexible input size
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((8, 8))
+        # Calculate output size for a 256x256 input after four stride-2 convolutions: 16x16
+        self.output_height = 16
+        self.output_width = 16
+        self.output_features = hidden_dims[-1]
+        
+        # Total flattened size
+        flatten_size = self.output_features * self.output_height * self.output_width
         
         # Latent space
-        pooled_dim = hidden_dims[-1] * 8 * 8
-        self.fc_mu = nn.Linear(pooled_dim, latent_dim)
-        self.fc_var = nn.Linear(pooled_dim, latent_dim)
+        self.fc_mu = nn.Linear(flatten_size, latent_dim)
+        self.fc_var = nn.Linear(flatten_size, latent_dim)
         
-        # Enhanced projection head for contrastive learning (3-layer MLP)
+        # Projection head for contrastive learning
         self.projection_head = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim),
-            nn.LayerNorm(latent_dim),
-            nn.ReLU(inplace=True),
             nn.Linear(latent_dim, latent_dim // 2),
-            nn.LayerNorm(latent_dim // 2),
-            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(latent_dim // 2),
+            nn.ReLU(),
             nn.Linear(latent_dim // 2, latent_dim // 4)
         )
         
-        # Positional encoding for latent space
-        self.positional_encoding = PositionalEncoding(latent_dim)
+        # Decoder - Start with latent dim to initial volume
+        self.decoder_input = nn.Linear(latent_dim, hidden_dims[-1] * 4 * 4)
         
-        # Decoder with skip connections
-        hidden_dims.reverse()
-        # Set a fixed spatial size that matches the adaptive pooling output
-        self.spatial_size = 8
-        # Calculate exact dimensions for the decoder input
-        target_decoder_size = hidden_dims[0] * self.spatial_size * self.spatial_size
-        self.decoder_input = nn.Linear(latent_dim, target_decoder_size)
+        # Reverse hidden dims for decoder
+        hidden_dims_reversed = hidden_dims[::-1]
         
-        # Decoder blocks
-        self.decoder_blocks = nn.ModuleList()
-        for i in range(len(hidden_dims) - 1):
-            # Input channels: If using skip connections, double the channel count
-            in_ch = hidden_dims[i] * 2 if i > 0 else hidden_dims[i]
-            
-            self.decoder_blocks.append(
+        # Decoder layers
+        decoder_modules = []
+        
+        # Add transposed convolutions to increase spatial dimensions
+        for i in range(len(hidden_dims_reversed) - 1):
+            decoder_modules.append(
                 nn.Sequential(
-                    nn.ConvTranspose2d(in_ch, hidden_dims[i+1],
-                                     kernel_size=3, stride=2, padding=1, output_padding=1),
-                    nn.InstanceNorm2d(hidden_dims[i+1]),
-                    nn.LeakyReLU(),
-                    nn.Conv2d(hidden_dims[i+1], hidden_dims[i+1], kernel_size=3, padding=1),  # Additional conv
-                    nn.InstanceNorm2d(hidden_dims[i+1]),
+                    nn.ConvTranspose2d(hidden_dims_reversed[i], hidden_dims_reversed[i+1],
+                                    kernel_size=3, stride=2, padding=1, output_padding=1),
+                    nn.BatchNorm2d(hidden_dims_reversed[i+1]),
                     nn.LeakyReLU()
                 )
             )
         
-        # Final layer
-        self.final_layer = nn.Sequential(
-            nn.ConvTranspose2d(hidden_dims[-1], hidden_dims[-1],
-                             kernel_size=3, stride=2, padding=1, output_padding=1),
-            nn.InstanceNorm2d(hidden_dims[-1]),
-            nn.LeakyReLU(),
-            nn.Conv2d(hidden_dims[-1], hidden_dims[-1], kernel_size=3, padding=1),
-            nn.InstanceNorm2d(hidden_dims[-1]),
-            nn.LeakyReLU(),
-            nn.Conv2d(hidden_dims[-1], input_channels, kernel_size=3, padding=1),
-            nn.Sigmoid()
+        # Final layer to output image
+        decoder_modules.append(
+            nn.Sequential(
+                nn.ConvTranspose2d(hidden_dims_reversed[-1], hidden_dims_reversed[-1],
+                                kernel_size=3, stride=2, padding=1, output_padding=1),
+                nn.BatchNorm2d(hidden_dims_reversed[-1]),
+                nn.LeakyReLU(),
+                nn.Conv2d(hidden_dims_reversed[-1], input_channels, kernel_size=3, padding=1),
+                nn.Sigmoid()
+            )
         )
+        
+        self.decoder = nn.Sequential(*decoder_modules)
         
         # Memory bank for contrastive learning
         self.register_buffer("queue", torch.randn(128, latent_dim // 4))
         self.queue = F.normalize(self.queue, dim=1)
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
-        self.temperature = 0.5  # Initial temperature for contrastive loss
         
     def encode(self, x):
-        """Encode input images to latent representations with feature storage for skip connections."""
-        # Reset encoder features
-        self.encoder_features = []
+        """Encode input images to latent representations"""
+        # Process through encoder
+        features = self.encoder(x)
         
-        # Process through encoder blocks
-        result = x
-        for block in self.encoder_blocks:
-            result = block(result)
-            self.encoder_features.append(result)
+        # Flatten
+        flattened = torch.flatten(features, start_dim=1)
         
-        # Adaptive pooling for flexible input sizes
-        result = self.adaptive_pool(result)
-        result = torch.flatten(result, start_dim=1)
-        
-        mu = self.fc_mu(result)
-        log_var = self.fc_var(result)
-        
-        # Add positional encoding to latent space
-        mu = self.positional_encoding(mu)
+        # Get latent parameters
+        mu = self.fc_mu(flattened)
+        log_var = self.fc_var(flattened)
         
         return mu, log_var
     
-    def decode(self, z):
-        """Decode latent representations back to images using skip connections."""
-        batch_size = z.size(0)
-        result = self.decoder_input(z)
-        
-        # Before attempting to reshape, print dimensions for debugging
-        # Calculate what dimensions would work given the tensor size
-        total_elems = result.numel() // batch_size
-        hidden_dim = self.hidden_dims[0]
-        spatial_dim = int((total_elems / hidden_dim) ** 0.5)
-        
-        # Safely reshape using calculated dimensions
-        result = result.view(batch_size, hidden_dim, spatial_dim, spatial_dim)
-        
-        # Store this for future reference
-        self.actual_spatial_size = spatial_dim
-        
-        # Reverse encoder features for skip connections
-        encoder_features = list(reversed(self.encoder_features))
-        
-        # Process through decoder blocks with skip connections
-        for i, block in enumerate(self.decoder_blocks):
-            # Add skip connection if we're past the first block and have encoder features
-            if i > 0 and i < len(encoder_features):
-                # Resize encoder feature to match current size if needed
-                encoder_feature = encoder_features[i]
-                if encoder_feature.shape[2:] != result.shape[2:]:
-                    encoder_feature = F.interpolate(
-                        encoder_feature, 
-                        size=result.shape[2:], 
-                        mode='bilinear', 
-                        align_corners=False
-                    )
-                # Concatenate along channel dimension
-                result = torch.cat([result, encoder_feature], dim=1)
-            
-            result = block(result)
-        
-        # Apply final layer
-        result = self.final_layer(result)
-        
-        return result
-    
     def reparameterize(self, mu, log_var):
-        """Reparameterization trick for sampling from the latent space."""
+        """Reparameterization trick for sampling from the latent space"""
         std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
         return mu + eps * std
     
+    def decode(self, z):
+        """Decode latent representations back to images"""
+        # Map from latent space to initial decoder volume
+        result = self.decoder_input(z)
+        
+        # Reshape to spatial volume - fixed 4x4 spatial starting dimensions
+        batch_size = z.size(0)
+        result = result.view(batch_size, self.hidden_dims[-1], 4, 4)
+        
+        # Process through decoder
+        return self.decoder(result)
+    
     def project(self, z):
-        """Project latent representations for contrastive learning."""
+        """Project latent representations for contrastive learning"""
         return self.projection_head(z)
     
     @torch.no_grad()
     def update_queue(self, z_proj):
-        """Update memory bank queue for contrastive learning."""
+        """Update memory bank queue for contrastive learning"""
         batch_size = z_proj.shape[0]
         ptr = int(self.queue_ptr)
         
@@ -197,17 +136,25 @@ class CVAE(nn.Module):
         self.queue_ptr[0] = ptr
     
     def forward(self, x):
-        """Forward pass through the enhanced CVAE."""
+        """Forward pass through the CVAE"""
+        # Encode
         mu, log_var = self.encode(x)
+        
+        # Sample latent
         z = self.reparameterize(mu, log_var)
+        
+        # Decode
         x_recon = self.decode(z)
-        z_proj = self.project(z)  # For contrastive learning
+        
+        # Project for contrastive learning
+        z_proj = self.project(z)
         
         # Update memory bank (only during training)
         if self.training:
             with torch.no_grad():
                 self.update_queue(F.normalize(z_proj.detach(), dim=1))
         
+        # Return all intermediate results
         return {
             'reconstruction': x_recon,
             'mu': mu,
@@ -218,115 +165,78 @@ class CVAE(nn.Module):
             'queue': self.queue,  # Provide queue for expanded contrastive loss
         }
     
-    def contrastive_loss(self, z_proj, labels=None, temperature=None):
-        """
-        Enhanced contrastive loss with memory bank and temperature annealing.
-        
-        Args:
-            z_proj: Projected latent representations
-            labels: Optional class labels for supervised contrastive loss
-            temperature: Optional temperature parameter (uses self.temperature if None)
-        """
-        if temperature is None:
-            temperature = self.temperature
-            
+    def contrastive_loss(self, z_proj, labels=None, temperature=0.5):
+        """Calculate contrastive loss with memory bank support"""
         batch_size = z_proj.size(0)
         device = z_proj.device
         
         # Normalize projections
         z_proj_norm = F.normalize(z_proj, dim=1)
         
-        # Compute logits with both batch samples and queue
+        # Compute cosine similarity matrix
+        sim_matrix = torch.mm(z_proj_norm, z_proj_norm.t()) / temperature
+        
+        # Include memory bank if available
         queue = self.queue.clone().detach()
         
-        # Compute similarities within batch
-        sim_batch = torch.mm(z_proj_norm, z_proj_norm.t()) / temperature
-        
-        # Compute similarities with queue
-        sim_queue = torch.mm(z_proj_norm, queue.t()) / temperature
+        # Calculate similarities with queue
+        queue_sim = torch.mm(z_proj_norm, queue.t()) / temperature
         
         # Combine for full similarity matrix
-        logits = torch.cat([sim_batch, sim_queue], dim=1)
+        sim_matrix_expanded = torch.cat([sim_matrix, queue_sim], dim=1)
         
         if labels is not None:
             # Supervised contrastive loss
-            # Create a mask for positive pairs (same class)
             pos_mask = labels.unsqueeze(1) == labels.unsqueeze(0)
             pos_mask = pos_mask.float()
             
             # Remove self-comparisons
-            self_mask = torch.eye(batch_size, device=device)
-            pos_mask = pos_mask - self_mask
+            eye_mask = torch.eye(batch_size, device=device)
+            pos_mask = pos_mask - eye_mask
             pos_mask = torch.clamp(pos_mask, 0, 1)
             
-            # Count positive pairs for each anchor
+            # Count positive pairs
             num_pos = pos_mask.sum(dim=1)
             
-            # Handle anchors with no positives (use self as positive)
-            no_pos_mask = (num_pos == 0).float()
-            pos_mask = pos_mask + self_mask * no_pos_mask.unsqueeze(1)
-            num_pos = pos_mask.sum(dim=1)
+            # Handle samples with no positives
+            valid_samples = num_pos > 0
+            if valid_samples.sum() == 0:
+                return torch.tensor(0.0, device=device)
             
-            # Apply log-softmax and compute loss
-            log_prob = F.log_softmax(logits, dim=1)[:, :batch_size]
-            
-            # Calculate loss as negative mean of positive log-likelihood
-            mean_log_prob_pos = (pos_mask * log_prob).sum(1) / num_pos
-            loss = -mean_log_prob_pos.mean()
+            # Log probabilities and loss calculation
+            log_prob = F.log_softmax(sim_matrix_expanded, dim=1)[:, :batch_size]
+            mean_log_prob_pos = (pos_mask * log_prob).sum(1) / num_pos.clamp(min=1)
+            loss = -mean_log_prob_pos[valid_samples].mean()
         else:
-            # Unsupervised contrastive loss (InfoNCE)
-            # For each query, the positive key is itself (diagonal of sim_batch)
+            # Unsupervised contrastive loss
             labels = torch.arange(batch_size, device=device)
             
-            # Mask out self-comparisons for loss calculation
-            mask = torch.eye(batch_size, device=device)
-            sim_batch_masked = sim_batch - mask * 1e9
+            # Mask out self-comparisons
+            sim_matrix_no_diag = sim_matrix - torch.eye(batch_size, device=device) * 1e9
             
-            # Only use masked batch similarity for loss
-            loss = F.cross_entropy(sim_batch_masked, labels)
-            
+            # Standard cross entropy loss
+            loss = F.cross_entropy(sim_matrix_no_diag, labels)
+        
         return loss
 
 
 class SpatialAttention(nn.Module):
-    """Spatial attention module to focus on relevant features."""
-    def __init__(self, in_channels):
+    """Spatial attention module to focus on relevant features"""
+    def __init__(self, channels):
         super(SpatialAttention, self).__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels // 8, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels // 8, 1, kernel_size=1),
+            nn.Conv2d(2, 1, kernel_size=7, padding=3),
             nn.Sigmoid()
         )
-    
+        
     def forward(self, x):
-        # Generate attention map
-        attention = self.conv(x)
+        # Create attention map using avg and max pooling
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        
+        # Concatenate and convolve
+        x_cat = torch.cat([avg_out, max_out], dim=1)
+        attention = self.conv(x_cat)
+        
         # Apply attention
         return x * attention
-
-
-class PositionalEncoding(nn.Module):
-    """Positional encoding for latent space to preserve spatial information."""
-    def __init__(self, d_model, dropout=0.1, max_len=256):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        self.d_model = d_model
-        
-        # Create simplified positional encoding for latent vector
-        self.position_embedding = nn.Embedding(1, d_model)
-        
-        # Linear projection to combine with input
-        self.fc = nn.Linear(d_model, d_model)
-        
-    def forward(self, x):
-        # For latent vectors without sequence dimension
-        batch_size = x.size(0)
-        
-        # Generate position embedding (same for all samples in batch)
-        pos_emb = self.position_embedding(torch.zeros(1, dtype=torch.long, device=x.device))
-        pos_emb = pos_emb.expand(batch_size, self.d_model)
-        
-        # Add position embedding and apply projection
-        x = x + 0.1 * pos_emb  # Scale down positional contribution
-        return self.dropout(self.fc(x))
