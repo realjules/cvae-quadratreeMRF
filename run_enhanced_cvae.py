@@ -67,18 +67,19 @@ class EnhancedCVAELoss(torch.nn.Module):
             self.kld_weight * 0.001 * kld_loss
         )
         
-        # Safety check for NaN or Inf values
+        # Safety check for NaN or Inf values - CRITICAL FIX HERE
         if torch.isnan(total_loss) or torch.isinf(total_loss):
             print("Warning: NaN or Inf detected in loss calculation")
-            total_loss = torch.tensor(100.0, device=total_loss.device)
+            # Create a small loss that maintains gradient connection
+            total_loss = 0.1 * (x_recon.sum() - x_recon.sum().detach() + 100.0)
         
         # Return loss components for monitoring
         loss_components = {
-            'recon_loss': recon_loss,
-            'mse_loss': mse_loss,
-            'ssim_loss': ssim_loss, 
-            'kld_loss': kld_loss,
-            'total_loss': total_loss,
+            'recon_loss': recon_loss.detach() if not torch.isnan(recon_loss) and not torch.isinf(recon_loss) else torch.tensor(0.0, device=recon_loss.device),
+            'mse_loss': mse_loss.detach() if not torch.isnan(mse_loss) and not torch.isinf(mse_loss) else torch.tensor(0.0, device=mse_loss.device),
+            'ssim_loss': ssim_loss.detach() if not torch.isnan(ssim_loss) and not torch.isinf(ssim_loss) else torch.tensor(0.0, device=ssim_loss.device), 
+            'kld_loss': kld_loss.detach() if not torch.isnan(kld_loss) and not torch.isinf(kld_loss) else torch.tensor(0.0, device=kld_loss.device),
+            'total_loss': total_loss.detach() if not torch.isnan(total_loss) and not torch.isinf(total_loss) else torch.tensor(0.0, device=total_loss.device),
         }
         
         return total_loss, loss_components
