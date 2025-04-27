@@ -227,57 +227,101 @@ class EnhancedCVAE(nn.Module):
         self.queue_ptr[0] = ptr
     
     def perceptual_loss(self, x_recon, x_orig):
-        """Calculate perceptual loss using VGG16 features"""
+        """Calculate perceptual loss using VGG16 features with improved stability"""
         # Only compute if we have a GPU available (VGG is large)
         if torch.cuda.is_available():
-            # Make sure both inputs are in correct format (may need to denormalize)
-            x_recon_vgg = self.perceptual_network(x_recon)
-            x_orig_vgg = self.perceptual_network(x_orig)
-            
-            # L2 loss between feature representations
-            return F.mse_loss(x_recon_vgg, x_orig_vgg)
+            try:
+                # Ensure input is in valid range for VGG (0-1)
+                x_recon_safe = torch.clamp(x_recon, 0, 1)
+                x_orig_safe = torch.clamp(x_orig, 0, 1)
+                
+                # Apply the perceptual network with gradient handling
+                x_recon_vgg = self.perceptual_network(x_recon_safe)
+                x_orig_vgg = self.perceptual_network(x_orig_safe)
+                
+                # Check for NaN values in features
+                if torch.isnan(x_recon_vgg).any() or torch.isnan(x_orig_vgg).any():
+                    return torch.tensor(0.0, device=x_recon.device)
+                
+                # L2 loss between feature representations with clamping
+                loss = F.mse_loss(x_recon_vgg, x_orig_vgg)
+                return torch.clamp(loss, 0, 10.0)  # Prevent extremely large values
+            except Exception as e:
+                print(f"Warning in perceptual loss: {e}")
+                return torch.tensor(0.0, device=x_recon.device)
         else:
             # Return a dummy tensor if no GPU
             return torch.tensor(0.0, device=x_recon.device)
     
     def ssim_loss(self, x_recon, x_orig, window_size=11, sigma=1.5):
-        """Calculate structural similarity loss"""
-        C1 = 0.01 ** 2
-        C2 = 0.03 ** 2
+        """Calculate structural similarity loss with improved numerical stability"""
+        # Add small constants for numerical stability
+        C1 = (0.01) ** 2
+        C2 = (0.03) ** 2
         
-        # Create Gaussian kernel
-        kernel_size = window_size
-        kernel = self.create_gaussian_kernel(kernel_size, sigma).to(x_recon.device)
-        
-        # Convert to grayscale if RGB
-        if x_recon.size(1) == 3:
-            # Convert to grayscale using RGB weights
-            # Red: 0.299, Green: 0.587, Blue: 0.114
-            weights = torch.FloatTensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1).to(x_recon.device)
-            x_recon_gray = (x_recon * weights).sum(dim=1, keepdim=True)
-            x_orig_gray = (x_orig * weights).sum(dim=1, keepdim=True)
-        else:
-            x_recon_gray = x_recon
-            x_orig_gray = x_orig
-        
-        # Compute means
-        mu1 = F.conv2d(x_recon_gray, kernel, padding=kernel_size//2, groups=1)
-        mu2 = F.conv2d(x_orig_gray, kernel, padding=kernel_size//2, groups=1)
-        
-        mu1_sq = mu1 ** 2
-        mu2_sq = mu2 ** 2
-        mu1_mu2 = mu1 * mu2
-        
-        # Compute variances
-        sigma1_sq = F.conv2d(x_recon_gray**2, kernel, padding=kernel_size//2, groups=1) - mu1_sq
-        sigma2_sq = F.conv2d(x_orig_gray**2, kernel, padding=kernel_size//2, groups=1) - mu2_sq
-        sigma12 = F.conv2d(x_recon_gray * x_orig_gray, kernel, padding=kernel_size//2, groups=1) - mu1_mu2
-        
-        # SSIM formula
-        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
-        
-        # Convert to loss (1 - SSIM)
-        return 1 - ssim_map.mean()
+        try:
+            # Ensure inputs are properly clipped to valid range
+            x_recon = torch.clamp(x_recon, 0, 1)
+            x_orig = torch.clamp(x_orig, 0, 1)
+            
+            # Create Gaussian kernel
+            kernel_size = window_size
+            kernel = self.create_gaussian_kernel(kernel_size, sigma).to(x_recon.device)
+            
+            # Use a smaller window_size for better performance and stability
+            if window_size > 7:
+                kernel_size = 7
+                kernel = self.create_gaussian_kernel(kernel_size, sigma).to(x_recon.device)
+            
+            # Convert to grayscale if RGB
+            if x_recon.size(1) == 3:
+                # Convert to grayscale using RGB weights
+                # Red: 0.299, Green: 0.587, Blue: 0.114
+                weights = torch.FloatTensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1).to(x_recon.device)
+                x_recon_gray = (x_recon * weights).sum(dim=1, keepdim=True)
+                x_orig_gray = (x_orig * weights).sum(dim=1, keepdim=True)
+            else:
+                x_recon_gray = x_recon
+                x_orig_gray = x_orig
+            
+            # Compute means
+            mu1 = F.conv2d(x_recon_gray, kernel, padding=kernel_size//2, groups=1)
+            mu2 = F.conv2d(x_orig_gray, kernel, padding=kernel_size//2, groups=1)
+            
+            mu1_sq = mu1 ** 2
+            mu2_sq = mu2 ** 2
+            mu1_mu2 = mu1 * mu2
+            
+            # Compute variances with epsilon for stability
+            eps = 1e-6
+            sigma1_sq = F.conv2d(x_recon_gray**2, kernel, padding=kernel_size//2, groups=1) - mu1_sq + eps
+            sigma2_sq = F.conv2d(x_orig_gray**2, kernel, padding=kernel_size//2, groups=1) - mu2_sq + eps
+            sigma12 = F.conv2d(x_recon_gray * x_orig_gray, kernel, padding=kernel_size//2, groups=1) - mu1_mu2 + eps
+            
+            # Ensure positive variances (shouldn't be negative, but just in case)
+            sigma1_sq = torch.clamp(sigma1_sq, min=eps)
+            sigma2_sq = torch.clamp(sigma2_sq, min=eps)
+            
+            # SSIM formula with careful handling of divisions
+            numerator = (2 * mu1_mu2 + C1) * (2 * sigma12 + C2)
+            denominator = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+            ssim_map = numerator / (denominator + eps)
+            
+            # Clamp to avoid extreme values
+            ssim_map = torch.clamp(ssim_map, 0, 1)
+            
+            # Convert to loss (1 - SSIM)
+            loss = 1 - ssim_map.mean()
+            
+            # Final safety check 
+            if torch.isnan(loss) or torch.isinf(loss):
+                return torch.tensor(0.0, device=x_recon.device)
+                
+            return loss
+            
+        except Exception as e:
+            print(f"Warning in SSIM calculation: {e}")
+            return torch.tensor(0.0, device=x_recon.device)
     
     def create_gaussian_kernel(self, kernel_size, sigma):
         """Create a Gaussian kernel for SSIM calculation"""

@@ -12,7 +12,7 @@ import numpy as np
 from datetime import datetime
 from tqdm import tqdm
 from skimage import io
-from torch.cuda.amp import autocast, GradScaler
+import torch.amp  # Updated imports for torch.amp
 
 from net.enhanced_cvae import EnhancedCVAE
 from torch.utils.data import Dataset, DataLoader
@@ -25,8 +25,9 @@ class EnhancedCVAELoss(torch.nn.Module):
     - Contrastive loss
     - Perceptual loss (if available)
     """
-    def __init__(self, kld_weight=0.001, contrastive_weight=0.5, ssim_weight=0.3, perceptual_weight=0.1):
+    def __init__(self, kld_weight=0.0001, contrastive_weight=0.1, ssim_weight=0.05, perceptual_weight=0.01):
         super(EnhancedCVAELoss, self).__init__()
+        # Using much smaller initial weights to prevent instability
         self.kld_weight = kld_weight
         self.contrastive_weight = contrastive_weight
         self.ssim_weight = ssim_weight
@@ -36,6 +37,9 @@ class EnhancedCVAELoss(torch.nn.Module):
         # For adaptive loss weights
         self.epoch = 0
         self.total_epochs = 100  # Will be updated in update_epoch
+        
+        # Add warm-up factor for KL divergence
+        self.kld_warmup_epochs = 10  # Warm up KLD over first 10 epochs
             
     def forward(self, outputs, targets=None, mode='full'):
         # Extract values from outputs dictionary
@@ -53,25 +57,38 @@ class EnhancedCVAELoss(torch.nn.Module):
         ssim_loss = outputs.get('ssim_loss', torch.tensor(0.0, device=mse_loss.device))
         ssim_loss = torch.clamp(ssim_loss, 0, 10)  # Prevent extremely large values
         
-        # KL Divergence loss with added numerical stability and clipping
-        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp() + 1e-8)
-        kld_loss = kld_loss / (original_input.size(0) * original_input.size(1))  # Normalize by batch size and feature dim
-        kld_loss = torch.clamp(kld_loss, 0, 10)  # Prevent extremely large values
+        # KL Divergence loss with improved numerical stability
+        # Clamp log_var to prevent extreme values
+        log_var_clamped = torch.clamp(log_var, -20, 20)  # Prevent extreme values
+        
+        # Add epsilon inside the calculation for numerical stability
+        kld_loss = -0.5 * torch.sum(1 + log_var_clamped - mu.pow(2).clamp(max=10) - log_var_clamped.exp().clamp(max=10) + 1e-8)
+        kld_loss = kld_loss / (original_input.size(0) * original_input.size(1) * original_input.size(2) * original_input.size(3))  # Normalize by entire input size
+        kld_loss = torch.clamp(kld_loss, 0, 1.0)  # Stricter clamping to prevent exploding gradients
+        
+        # Use a much smaller SSIM weight to prevent NaN
+        ssim_weight_adjusted = self.ssim_weight * 0.01
         
         # Combined reconstruction loss with smaller weights
-        recon_loss = mse_loss + self.ssim_weight * 0.1 * ssim_loss
+        recon_loss = mse_loss + ssim_weight_adjusted * ssim_loss
         
-        # Total loss with much smaller weights
-        total_loss = (
-            recon_loss + 
-            self.kld_weight * 0.001 * kld_loss
-        )
+        # Use adaptive KL weight based on epoch
+        if hasattr(self, 'current_kld_weight'):
+            kld_weight_to_use = self.current_kld_weight
+        else:
+            # Fallback if update_epoch wasn't called yet
+            kld_weight_to_use = self.kld_weight * 0.1
+            
+        # Total loss with adaptive KLD weight
+        total_loss = recon_loss + kld_weight_to_use * kld_loss
         
-        # Safety check for NaN or Inf values - CRITICAL FIX HERE
+        # Safety check for NaN or Inf values - IMPROVED CRITICAL FIX
         if torch.isnan(total_loss) or torch.isinf(total_loss):
             print("Warning: NaN or Inf detected in loss calculation")
-            # Create a small loss that maintains gradient connection
-            total_loss = 0.1 * (x_recon.sum() - x_recon.sum().detach() + 100.0)
+            # Creating a more stable fallback loss
+            # Use a small constant loss instead of trying to maintain gradient connection
+            # This helps training continue without propagating bad gradients
+            total_loss = torch.tensor(0.01, device=total_loss.device, requires_grad=True)
         
         # Return loss components for monitoring
         loss_components = {
@@ -87,6 +104,13 @@ class EnhancedCVAELoss(torch.nn.Module):
         """Update internal epoch counter for adaptive loss weights"""
         self.epoch = current_epoch
         self.total_epochs = total_epochs
+        
+        # Implement KL annealing - gradually increase KL weight
+        if current_epoch < self.kld_warmup_epochs:
+            # Linear warmup of KL weight
+            self.current_kld_weight = self.kld_weight * (current_epoch / self.kld_warmup_epochs)
+        else:
+            self.current_kld_weight = self.kld_weight
 
 
 class UnsupervisedDataset(Dataset):
@@ -168,8 +192,8 @@ def train_enhanced_cvae(net, criterion, optimizer, scheduler, train_loader, val_
     # Create output directory if it doesn't exist
     os.makedirs(output_path, exist_ok=True)
     
-    # Initialize mixed precision training
-    scaler = GradScaler()
+    # Initialize mixed precision training with updated API
+    scaler = torch.amp.GradScaler('cuda')  # Fix for FutureWarning
     
     # Loss tracking
     train_losses = []
@@ -208,8 +232,8 @@ def train_enhanced_cvae(net, criterion, optimizer, scheduler, train_loader, val_
             
             optimizer.zero_grad()
             
-            # Mixed precision forward pass
-            with autocast():
+            # Mixed precision forward pass with updated API
+            with torch.amp.autocast('cuda'):  # Fix for FutureWarning
                 # Add model to outputs for loss calculation
                 outputs = net(data)
                 outputs['model'] = net
@@ -229,9 +253,17 @@ def train_enhanced_cvae(net, criterion, optimizer, scheduler, train_loader, val_
             total_norm = total_norm ** 0.5
             grad_norms.append(total_norm)
             
-            # Gradient clipping
+            # Enhanced gradient clipping with better handling
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
+            
+            # Check for NaN or Inf gradients and reset them
+            for param in net.parameters():
+                if param.grad is not None:
+                    # Replace NaN/Inf gradients with zeros
+                    param.grad.data.masked_fill_(torch.isnan(param.grad.data) | torch.isinf(param.grad.data), 0.0)
+            
+            # Stricter gradient clipping
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=0.5)  # Reduced from 1.0
             
             # Update with gradient scaling
             scaler.step(optimizer)
@@ -439,8 +471,14 @@ def main():
         perceptual_weight=args.perceptual_weight
     )
     
-    # Set up optimizer
-    optimizer = torch.optim.AdamW(cvae.parameters(), lr=args.base_lr, weight_decay=0.0001)
+    # Set up optimizer with improved stability parameters
+    optimizer = torch.optim.AdamW(
+        cvae.parameters(), 
+        lr=args.base_lr,
+        weight_decay=0.0001,
+        eps=1e-5,  # Increase epsilon for more stability
+        amsgrad=True  # Use AMSGrad variant for better stability
+    )
     
     # Use GPU if available
     if torch.cuda.is_available():
@@ -470,14 +508,16 @@ def main():
     steps_per_epoch = len(train_loader)
     total_steps = epochs * steps_per_epoch
     
+    # Use more conservative learning rate scheduling
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=args.base_lr,
+        max_lr=args.base_lr * 0.5,  # Lower max learning rate for stability
         total_steps=total_steps,
-        pct_start=0.3,  # Warm-up for 30% of training
+        pct_start=0.4,  # Longer warm-up period (40% of training)
         anneal_strategy='cos',
-        div_factor=25.0,  # initial_lr = max_lr/25
-        final_div_factor=1000.0  # min_lr = initial_lr/1000
+        div_factor=20.0,  # Less aggressive initial LR reduction
+        final_div_factor=500.0,  # Less aggressive final LR reduction
+        cycle_momentum=False  # Disable momentum cycling for stability
     )
     
     # Train the model
