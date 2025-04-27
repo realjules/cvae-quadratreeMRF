@@ -36,7 +36,7 @@ class EnhancedCVAELoss(torch.nn.Module):
         # For adaptive loss weights
         self.epoch = 0
         self.total_epochs = 100  # Will be updated in update_epoch
-        
+            
     def forward(self, outputs, targets=None, mode='full'):
         # Extract values from outputs dictionary
         x_recon = outputs['reconstruction']
@@ -45,58 +45,43 @@ class EnhancedCVAELoss(torch.nn.Module):
         z_proj = outputs['z_proj']
         original_input = outputs['original_input']
         
-        # Reconstruction loss (pixel-wise MSE)
-        mse_loss = self.mse_loss(x_recon, original_input)
+        # Reconstruction loss (pixel-wise MSE) with value clipping
+        mse_loss = torch.nn.functional.mse_loss(x_recon, original_input)
+        mse_loss = torch.clamp(mse_loss, 0, 100)  # Prevent extremely large values
         
-        # SSIM loss (if available in outputs)
+        # SSIM loss with safety checks
         ssim_loss = outputs.get('ssim_loss', torch.tensor(0.0, device=mse_loss.device))
+        ssim_loss = torch.clamp(ssim_loss, 0, 10)  # Prevent extremely large values
         
-        # Perceptual loss (if available in outputs)
-        perceptual_loss = outputs.get('perceptual_loss', torch.tensor(0.0, device=mse_loss.device))
+        # KL Divergence loss with added numerical stability and clipping
+        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp() + 1e-8)
+        kld_loss = kld_loss / (original_input.size(0) * original_input.size(1))  # Normalize by batch size and feature dim
+        kld_loss = torch.clamp(kld_loss, 0, 10)  # Prevent extremely large values
         
-        # Combined reconstruction loss
-        recon_loss = mse_loss + self.ssim_weight * ssim_loss + self.perceptual_weight * perceptual_loss
+        # Combined reconstruction loss with smaller weights
+        recon_loss = mse_loss + self.ssim_weight * 0.1 * ssim_loss
         
-        # KL Divergence loss with annealing
-        # Gradually increase KLD weight during training
-        kld_annealing = min(1.0, self.epoch / (0.3 * self.total_epochs))
-        kld_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
-        kld_loss = kld_loss / original_input.size(0)  # Normalize by batch size
-        kld_weight = self.kld_weight * kld_annealing
-        
-        # Contrastive loss
-        contrastive_loss = 0.0
-        if 'z_proj' in outputs and hasattr(outputs.get('model', None), 'contrastive_loss'):
-            contrastive_loss = outputs['model'].contrastive_loss(
-                z_proj, 
-                labels=None,  # Unsupervised mode
-                temperature=0.07
-            )
-        
-        # Total loss with adaptive weighting
+        # Total loss with much smaller weights
         total_loss = (
             recon_loss + 
-            kld_weight * kld_loss + 
-            self.contrastive_weight * contrastive_loss
+            self.kld_weight * 0.001 * kld_loss
         )
+        
+        # Safety check for NaN or Inf values
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            print("Warning: NaN or Inf detected in loss calculation")
+            total_loss = torch.tensor(100.0, device=total_loss.device)
         
         # Return loss components for monitoring
         loss_components = {
             'recon_loss': recon_loss,
             'mse_loss': mse_loss,
             'ssim_loss': ssim_loss, 
-            'perceptual_loss': perceptual_loss,
             'kld_loss': kld_loss,
-            'contrastive_loss': contrastive_loss,
             'total_loss': total_loss,
-            # Placeholders for compatibility with training loop
-            'seg_loss': torch.tensor(0.0, device=total_loss.device),
-            'hier_loss': torch.tensor(0.0, device=total_loss.device),
-            'hier_consistency_loss': torch.tensor(0.0, device=total_loss.device)
         }
         
         return total_loss, loss_components
-    
     def update_epoch(self, current_epoch, total_epochs):
         """Update internal epoch counter for adaptive loss weights"""
         self.epoch = current_epoch
