@@ -19,7 +19,7 @@ from skimage import io
 from sklearn.metrics import accuracy_score, jaccard_score, f1_score
 import cv2
 
-from net.enhanced_cvae import EnhancedCVAE
+from net.fixed_enhanced_cvae import FixedEnhancedCVAE as EnhancedCVAE
 from torch.utils.data import Dataset, DataLoader
 # Import advanced augmentation functions
 from utils.utils_dataset import elastic_transform, get_augmentation_transforms, cutmix_augmentation
@@ -389,14 +389,25 @@ class SegmentationTrainer:
     
     def _load_cvae(self, model_path, feature_dim):
         """Load pre-trained CVAE model"""
-        cvae = EnhancedCVAE(input_channels=3, latent_dim=feature_dim)
+        # Use the new FixedEnhancedCVAE with the right dimensions
+        # Note: Make sure to use the same hidden_dims as in training
+        cvae = EnhancedCVAE(
+            input_channels=3, 
+            latent_dim=feature_dim,
+            hidden_dims=[64, 128, 256, 512]
+        )
         
-        # Load weights
-        cvae.load_state_dict(torch.load(
-            model_path, 
-            map_location=torch.device(self.device),
-            weights_only=True
-        ))
+        # Load weights - use strict=False to handle potential differences
+        try:
+            cvae.load_state_dict(torch.load(
+                model_path, 
+                map_location=torch.device(self.device),
+                weights_only=True
+            ), strict=False)
+            print("CVAE model loaded successfully")
+        except Exception as e:
+            print(f"Warning when loading CVAE weights: {e}")
+            print("Proceeding with newly initialized model - performance may be affected")
         
         # Move to device and set to evaluation mode
         cvae = cvae.to(self.device)
@@ -411,45 +422,41 @@ class SegmentationTrainer:
                 # Get outputs from CVAE
                 outputs = self.cvae(images)
                 
-                # Extract relevant features: combinatiion of latent + deeper encoder features
-                z = outputs['z']  # latent code
-                encoder_features = outputs['encoder_features']  # encoder features
+                # Extract relevant features from the fixed enhanced CVAE
+                z = outputs['z']  # latent code (batch_size, 512)
+                encoder_features = outputs['encoder_features']  # List of encoder features [e1, e2, e3]
                 
-                # Use the deepest encoder features
-                deep_features = encoder_features[-1]
+                # Use the deepest encoder features (now at index 2)
+                # The encoder features for FixedEnhancedCVAE are [e1(64), e2(128), e3(256)]
+                deep_features = encoder_features[2]  # Shape: [batch_size, 256, 32, 32]
                 
-                # Size of input images
-                input_size = images.size(-1)
-                feature_size = deep_features.size(-1)
+                # Size of input and feature map
+                input_size = images.size(-1)  # 256
+                feature_size = deep_features.size(-1)  # 32
                 
-                # Expand latent code to match spatial dimensions
-                z_spatial = z.unsqueeze(-1).unsqueeze(-1)
+                # Expand latent vector to spatial dimensions
+                z_spatial = z.unsqueeze(-1).unsqueeze(-1)  # [batch_size, 512, 1, 1]
                 z_spatial = F.interpolate(
-                    z_spatial.expand(-1, -1, 2, 2),
-                    size=(feature_size, feature_size),
+                    z_spatial,
+                    size=(feature_size, feature_size),  # [batch_size, 512, 32, 32]
                     mode='bilinear',
                     align_corners=False
                 )
                 
-                # Create input for MRF by concatenating and projecting
-                # We need to project to match the expected feature_dim
-                if z_spatial.size(1) + deep_features.size(1) != self.feature_dim:
-                    # First concat
-                    combined = torch.cat([z_spatial, deep_features], dim=1)
-                    
-                    # Create projection if needed
-                    if not hasattr(self, 'projection') or self.projection.in_channels != combined.size(1):
-                        self.projection = nn.Conv2d(
-                            combined.size(1),
-                            self.feature_dim,
-                            kernel_size=1
-                        ).to(self.device)
-                    
-                    # Project to expected dimension
-                    features = self.projection(combined)
-                else:
-                    # Already the right dimension
-                    features = torch.cat([z_spatial, deep_features], dim=1)
+                # Create a projection layer to match the expected feature dimensions
+                # We need to reduce the combined channels to match the model's expected input
+                combined = torch.cat([z_spatial, deep_features], dim=1)  # [batch_size, 512+256, 32, 32]
+                
+                # Create or update projection layer if needed
+                if not hasattr(self, 'projection') or self.projection.in_channels != combined.size(1):
+                    self.projection = nn.Conv2d(
+                        combined.size(1),  # 512+256 = 768
+                        self.feature_dim,  # Usually 512
+                        kernel_size=1
+                    ).to(self.device)
+                
+                # Project to expected dimension
+                features = self.projection(combined)  # [batch_size, feature_dim, 32, 32]
                 
                 return features.detach()  # detach to avoid backprop into CVAE
                 

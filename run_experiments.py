@@ -13,11 +13,11 @@ from datetime import datetime
 
 # Experiment configurations
 LABELED_PERCENTAGES = [10, 30, 75, 100]
-BASE_EXPERIMENT_NAME = "SimplifiedMRF"
+BASE_EXPERIMENT_NAME = "EnhancedSimplifiedMRF"  # Updated name to reflect enhanced model
 EPOCHS = 30
 BATCH_SIZE = 4
 LEARNING_RATE = 0.001
-LATENT_DIM = 512
+LATENT_DIM = 512  # Matches the enhanced CVAE latent dimension
 SEED = 42
 
 # Make sure output directory exists
