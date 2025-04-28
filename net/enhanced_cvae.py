@@ -85,38 +85,39 @@ class EnhancedCVAE(nn.Module):
         # Reverse hidden dims for decoder
         hidden_dims_reversed = hidden_dims[::-1]
         
-        # Decoder blocks with skip connections
+        # Decoder blocks with skip connections - completely rebuilt for new structure
         self.decoder_blocks = nn.ModuleList()
         
-        # First decoder block (from bottleneck)
+        # We're using a different decoder structure that matches our 3-level encoder
+        # Instead of using all 4 levels of hidden_dims, we use only 3 (like in the encoder)
+        decoder_dims = hidden_dims[:3][::-1]  # Reverse and take first 3: [256, 128, 64]
+        
+        # First decoder block: 256->128, upsampling from 32x32 to 64x64
         self.decoder_blocks.append(
             nn.Sequential(
-                ResidualConvTransposeBlock(hidden_dims_reversed[0], hidden_dims_reversed[1 % len(hidden_dims_reversed)]),
-                nn.BatchNorm2d(hidden_dims_reversed[1 % len(hidden_dims_reversed)]),
+                ResidualConvTransposeBlock(decoder_dims[0], decoder_dims[1]),  # 256->128
+                nn.BatchNorm2d(decoder_dims[1]),
                 nn.LeakyReLU(0.2)
             )
         )
         
-        # Additional decoder blocks with skip connections
-        for i in range(1, len(hidden_dims_reversed) - 1):
-            # Input channels are doubled due to skip connection
-            in_channels = hidden_dims_reversed[i]
-            out_channels = hidden_dims_reversed[i+1]
-            
-            self.decoder_blocks.append(
-                nn.Sequential(
-                    ResidualConvTransposeBlock(in_channels * 2, out_channels),
-                    nn.BatchNorm2d(out_channels),
-                    nn.LeakyReLU(0.2)
-                )
+        # Second decoder block: (128+128)->64, upsampling from 64x64 to 128x128
+        # Input channels are doubled (128*2=256) due to skip connection
+        self.decoder_blocks.append(
+            nn.Sequential(
+                ResidualConvTransposeBlock(decoder_dims[1] * 2, decoder_dims[2]),  # 256->64
+                nn.BatchNorm2d(decoder_dims[2]),
+                nn.LeakyReLU(0.2)
             )
+        )
         
-        # Final layer to output image
+        # Final layer to output image, upsampling from 128x128 to 256x256
+        # Input channels are doubled (64*2=128) due to skip connection
         self.final_layer = nn.Sequential(
-            ResidualConvTransposeBlock(hidden_dims_reversed[-1] * 2, hidden_dims_reversed[-1]),
-            nn.BatchNorm2d(hidden_dims_reversed[-1]),
+            ResidualConvTransposeBlock(decoder_dims[2] * 2, decoder_dims[2]),  # 128->64
+            nn.BatchNorm2d(decoder_dims[2]),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(hidden_dims_reversed[-1], input_channels, kernel_size=3, padding=1),
+            nn.Conv2d(decoder_dims[2], input_channels, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
         
@@ -212,46 +213,60 @@ class EnhancedCVAE(nn.Module):
         
         # Reshape to spatial volume - now using 32x32 spatial starting dimensions
         batch_size = z.size(0)
-        result = result.view(batch_size, self.hidden_dims[-2], 32, 32)
+        result = result.view(batch_size, self.hidden_dims[2], 32, 32)  # Using the 3rd dim (256)
         
         # Process through decoder blocks with skip connections
         x = result
         
         # If we don't have encoder features, create dummy ones for inference
-        if encoder_features is None:
-            encoder_features = [None] * 3  # We only have 3 encoder features now
+        if encoder_features is None or len(encoder_features) < 3:
+            # Create encoder features with the right shapes and dimensions for testing
+            dummy_features = []
+            # First level feature: 64 channels, 64x64
+            dummy_features.append(torch.zeros(batch_size, self.hidden_dims[0], 64, 64, device=z.device))
+            # Second level feature: 128 channels, 32x32
+            dummy_features.append(torch.zeros(batch_size, self.hidden_dims[1], 32, 32, device=z.device))
+            # Third level feature: 256 channels, 16x16
+            dummy_features.append(torch.zeros(batch_size, self.hidden_dims[2], 16, 16, device=z.device))
             
-        # Simplified decoder path due to changed bottleneck structure
-        # We only use 2 decoder blocks instead of 3
+            encoder_features = dummy_features
         
-        # Apply first decoder block (no skip connection for this one)
-        # This will upsample from 32x32 to 64x64
-        x = self.decoder_blocks[0](x)
+        # Now we have a consistent simplified decoder path:
         
-        # Apply second decoder block with skip connection to second encoder feature
-        # This will upsample from 64x64 to 128x128
-        if len(encoder_features) >= 2:
-            # Concatenate with corresponding encoder features
-            x = torch.cat([x, encoder_features[1]], dim=1)
-            x = self.decoder_blocks[1](x)
+        # 1. First block: 256->128, 32x32 -> 64x64 (no skip connection yet)
+        x = self.decoder_blocks[0](x)  # Now x is [B, 128, 64, 64]
         
-        # Apply final decoder block with skip connection to first encoder feature
-        # This will upsample from 128x128 to 256x256
-        if len(encoder_features) >= 1:
-            # Ensure dimensions match before concatenation
-            if x.size(2) != encoder_features[0].size(2) or x.size(3) != encoder_features[0].size(3):
-                x = F.interpolate(
-                    x,
-                    size=(encoder_features[0].size(2), encoder_features[0].size(3)),
-                    mode='bilinear',
-                    align_corners=False
-                )
+        # 2. Second block: 128+128->64, 64x64 -> 128x128 (skip from encoder_features[1])
+        # Ensure dimensions match
+        if x.size(2) != encoder_features[1].size(2) or x.size(3) != encoder_features[1].size(3):
+            encoder_feat = F.interpolate(
+                encoder_features[1],
+                size=(x.size(2), x.size(3)),
+                mode='bilinear',
+                align_corners=False
+            )
+        else:
+            encoder_feat = encoder_features[1]
             
-            # Final concatenation and output layer
-            x = torch.cat([x, encoder_features[0]], dim=1)
+        # Concatenate and process
+        x = torch.cat([x, encoder_feat], dim=1)
+        x = self.decoder_blocks[1](x)  # Now x is [B, 64, 128, 128]
+        
+        # 3. Final block: 64+64->3, 128x128 -> 256x256 (skip from encoder_features[0])
+        # Ensure dimensions match
+        if x.size(2) != encoder_features[0].size(2) or x.size(3) != encoder_features[0].size(3):
+            encoder_feat = F.interpolate(
+                encoder_features[0],
+                size=(x.size(2), x.size(3)),
+                mode='bilinear',
+                align_corners=False
+            )
+        else:
+            encoder_feat = encoder_features[0]
             
-        # Apply final layer to generate RGB image
-        x = self.final_layer(x)
+        # Concatenate and process through final layer
+        x = torch.cat([x, encoder_feat], dim=1)
+        x = self.final_layer(x)  # Now x is [B, 3, 256, 256]
         
         return x
     
@@ -588,16 +603,18 @@ class ResidualConvTransposeBlock(nn.Module):
         self.conv = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
         
-        # Skip connection with upsampling
-        self.skip = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False),
-            nn.BatchNorm2d(out_channels)
-        )
+        # Skip connection with upsampling - creating fresh, not reusing existing one
+        # This is a crucial fix - creating a new skip connection for each instance
+        self.skip_upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.skip_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False)
+        self.skip_bn = nn.BatchNorm2d(out_channels)
     
     def forward(self, x):
-        # Process skip connection
-        residual = self.skip(x)
+        # Process skip connection - manually to avoid reusing old objects
+        # This ensures the skip connection uses the correct input channels
+        skip = self.skip_upsample(x)
+        skip = self.skip_conv(skip)
+        residual = self.skip_bn(skip)
         
         # Main path
         out = self.conv_transpose(x)

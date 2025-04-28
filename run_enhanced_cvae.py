@@ -14,7 +14,7 @@ from tqdm import tqdm
 from skimage import io
 import torch.amp  # Updated imports for torch.amp
 
-from net.enhanced_cvae import EnhancedCVAE
+from net.fixed_enhanced_cvae import FixedEnhancedCVAE as EnhancedCVAE
 from torch.utils.data import Dataset, DataLoader
 
 class EnhancedCVAELoss(torch.nn.Module):
