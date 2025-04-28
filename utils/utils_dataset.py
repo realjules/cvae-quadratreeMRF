@@ -162,23 +162,43 @@ def cutmix_augmentation(image1, mask1, image2, mask2, alpha=0.5):
     # Get dimensions
     _, h, w = image1.shape
     
-    # Generate random box
-    r_x = random.randint(0, w)
-    r_y = random.randint(0, h)
-    r_w = random.randint(1, w - r_x)
-    r_h = random.randint(1, h - r_y)
+    # Ensure minimum dimensions for safe random ranges
+    if h < 2 or w < 2:
+        return image1, mask1  # Can't apply CutMix to very small images
     
-    # Create box
-    x1 = r_x
-    y1 = r_y
-    x2 = r_x + r_w
-    y2 = r_y + r_h
+    # Generate random box with safeguards
+    r_x = random.randint(0, w-2)  # Ensure at least 1 pixel width
+    r_y = random.randint(0, h-2)  # Ensure at least 1 pixel height
     
-    # Apply mixing
-    mixed_image = image1.clone()
-    mixed_mask = mask1.clone()
-    
-    mixed_image[:, y1:y2, x1:x2] = image2[:, y1:y2, x1:x2]
-    mixed_mask[y1:y2, x1:x2] = mask2[y1:y2, x1:x2]
-    
-    return mixed_image, mixed_mask
+    try:
+        max_w = max(1, w - r_x - 1)  # Ensure at least 1 pixel width
+        max_h = max(1, h - r_y - 1)  # Ensure at least 1 pixel height
+        
+        r_w = random.randint(1, max_w)
+        r_h = random.randint(1, max_h)
+        
+        # Create box
+        x1 = r_x
+        y1 = r_y
+        x2 = min(r_x + r_w, w)  # Ensure we don't go out of bounds
+        y2 = min(r_y + r_h, h)  # Ensure we don't go out of bounds
+        
+        # Apply mixing
+        mixed_image = image1.clone()
+        mixed_mask = mask1.clone()
+        
+        # Ensure same dimensions for patch extraction
+        patch_h = min(y2 - y1, h - y1)
+        patch_w = min(x2 - x1, w - x1)
+        
+        # Only mix if we have valid dimensions
+        if patch_h > 0 and patch_w > 0:
+            mixed_image[:, y1:y1+patch_h, x1:x1+patch_w] = image2[:, y1:y1+patch_h, x1:x1+patch_w]
+            mixed_mask[y1:y1+patch_h, x1:x1+patch_w] = mask2[y1:y1+patch_h, x1:x1+patch_w]
+            
+        return mixed_image, mixed_mask
+        
+    except Exception as e:
+        # If anything goes wrong, return original images
+        print(f"CutMix error: {e}, falling back to original image")
+        return image1, mask1

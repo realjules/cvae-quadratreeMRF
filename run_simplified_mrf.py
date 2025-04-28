@@ -223,11 +223,15 @@ class SegmentationDataset(Dataset):
                     second_image_patch, second_label_patch = self.augment_data(second_image_patch, second_label_patch)
                     
                     # Apply CutMix between the two patches
-                    image_patch, label_patch = cutmix_augmentation(
-                        image_patch, label_patch, 
-                        second_image_patch, second_label_patch, 
-                        alpha=0.5
-                    )
+                    try:
+                        image_patch, label_patch = cutmix_augmentation(
+                            image_patch, label_patch, 
+                            second_image_patch, second_label_patch, 
+                            alpha=0.5
+                        )
+                    except ValueError:
+                        # Fall back to original patches if CutMix fails
+                        pass  # Keep original patches if CutMix fails
         
         return image_patch, label_patch
 
