@@ -437,7 +437,7 @@ def main():
     parser.add_argument('-lr', '--base_lr', default=0.001, type=float, help='Base learning rate')
     parser.add_argument('-e', '--epochs', default=30, type=int, help='Number of epochs')
     parser.add_argument('-se', '--save_epoch', default=5, type=int, help='Save model every N epochs')
-    parser.add_argument('-ld', '--latent_dim', default=256, type=int, help='Latent dimension size')
+    parser.add_argument('-ld', '--latent_dim', default=512, type=int, help='Latent dimension size')
     parser.add_argument('-kw', '--kld_weight', default=0.001, type=float, help='KL divergence weight')
     parser.add_argument('-cw', '--contrastive_weight', default=0.5, type=float, help='Contrastive loss weight')
     parser.add_argument('-sw', '--ssim_weight', default=0.3, type=float, help='SSIM loss weight')

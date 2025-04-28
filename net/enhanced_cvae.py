@@ -26,8 +26,9 @@ class EnhancedCVAE(nn.Module):
         
         # Initial projection layer to handle positional encoding
         # This adapts the input (RGB + positional encoding) to the proper channel count
+        # We'll use only 3 positional encoding channels to keep things simpler
         self.input_projection = nn.Conv2d(
-            input_channels + self.pos_encoding_channels,  # 3 (RGB) + 5 (positional encoding) = 8
+            input_channels + 3,  # 3 (RGB) + 3 (reduced positional encoding) = 6
             input_channels,  # Project back to 3 channels
             kernel_size=1,  # 1x1 convolution for channel projection
             stride=1,
@@ -50,14 +51,15 @@ class EnhancedCVAE(nn.Module):
             )
             in_channels = h_dim
             
-        # Calculate output size for a 256x256 input after stride-2 convolutions
-        # We now use first 3 downsampling blocks instead of 4 to maintain higher resolution
-        # at the bottleneck (8x8 instead of 4x4)
-        self.output_height = 256 // (2 ** (len(hidden_dims)-1))  # 8 for new hidden_dims
-        self.output_width = 256 // (2 ** (len(hidden_dims)-1))   # 8 for new hidden_dims
-        self.output_features = hidden_dims[-1]
+        # Calculate output size for a 256x256 input
+        # For the enhanced model, we use 3 downsampling layers (not 4)
+        # This gives us 256/(2^3) = 32x32 resolution at the bottleneck
+        # We use 32x32 instead of 8x8 to maintain more spatial information
+        self.output_height = 32  # Using 32x32 spatial dimensions at bottleneck
+        self.output_width = 32
+        self.output_features = hidden_dims[-2]  # Using the 3rd feature map (256), not the 4th (512)
         
-        # Total flattened size
+        # Total flattened size (256 * 32 * 32 = 262,144)
         flatten_size = self.output_features * self.output_height * self.output_width
         
         # Latent space with variational info bottleneck
@@ -78,7 +80,7 @@ class EnhancedCVAE(nn.Module):
         )
         
         # Decoder input - increased spatial resolution at bottleneck
-        self.decoder_input = nn.Linear(latent_dim, hidden_dims[-1] * 8 * 8)
+        self.decoder_input = nn.Linear(latent_dim, hidden_dims[-2] * 32 * 32)
         
         # Reverse hidden dims for decoder
         hidden_dims_reversed = hidden_dims[::-1]
@@ -174,15 +176,19 @@ class EnhancedCVAE(nn.Module):
         else:
             current_x = x
         
-        # Process through all encoder blocks
+        # Process through only the first 3 encoder blocks (not all 4)
+        # This provides higher resolution feature maps (32x32 instead of 16x16)
         for i, block in enumerate(self.encoder_blocks):
-            # For highest resolution at bottleneck, we can stop at second-to-last block
-            # when processing with higher resolution features
-            if i == len(self.encoder_blocks) - 1 and x.size(1) > self.input_channels:
+            # Stop after the third encoder block (indexed as 2)
+            if i >= 3:  # Only process first 3 blocks (0, 1, 2)
                 break
                 
             current_x = block(current_x)
             intermediate_features.append(current_x)
+            
+        # Ensure we have the expected feature size
+        assert current_x.size(2) == self.output_height and current_x.size(3) == self.output_width, \
+            f"Expected features of size ({self.output_height}, {self.output_width}), got ({current_x.size(2)}, {current_x.size(3)})"
             
         # Flatten final features
         flattened = torch.flatten(current_x, start_dim=1)
@@ -204,50 +210,35 @@ class EnhancedCVAE(nn.Module):
         # Map from latent space to initial decoder volume
         result = self.decoder_input(z)
         
-        # Reshape to spatial volume - now using 8x8 spatial starting dimensions
+        # Reshape to spatial volume - now using 32x32 spatial starting dimensions
         batch_size = z.size(0)
-        result = result.view(batch_size, self.hidden_dims[-1], 8, 8)
+        result = result.view(batch_size, self.hidden_dims[-2], 32, 32)
         
         # Process through decoder blocks with skip connections
         x = result
         
         # If we don't have encoder features, create dummy ones for inference
         if encoder_features is None:
-            encoder_features = [None] * len(self.decoder_blocks)
+            encoder_features = [None] * 3  # We only have 3 encoder features now
+            
+        # Simplified decoder path due to changed bottleneck structure
+        # We only use 2 decoder blocks instead of 3
         
         # Apply first decoder block (no skip connection for this one)
+        # This will upsample from 32x32 to 64x64
         x = self.decoder_blocks[0](x)
         
-        # Apply remaining decoder blocks with skip connections
-        # Account for possibly different number of features due to stopping at N-1 blocks
-        max_features = min(len(self.decoder_blocks), len(encoder_features) + 1)
-        
-        for i in range(1, max_features - 1):
-            # Find the corresponding encoder feature index
-            encoder_idx = -(i+1)
-            
-            # Ensure we don't go out of bounds
-            if abs(encoder_idx) > len(encoder_features):
-                continue
-                
-            # Get corresponding encoder features
-            encoder_feat = encoder_features[encoder_idx]
-            
-            # Upsample to match encoder feature size if needed
-            if x.size(2) != encoder_feat.size(2) or x.size(3) != encoder_feat.size(3):
-                x = F.interpolate(
-                    x, 
-                    size=(encoder_feat.size(2), encoder_feat.size(3)),
-                    mode='bilinear',
-                    align_corners=False
-                )
-            
+        # Apply second decoder block with skip connection to second encoder feature
+        # This will upsample from 64x64 to 128x128
+        if len(encoder_features) >= 2:
             # Concatenate with corresponding encoder features
-            x = torch.cat([x, encoder_feat], dim=1)
-            x = self.decoder_blocks[i](x)
+            x = torch.cat([x, encoder_features[1]], dim=1)
+            x = self.decoder_blocks[1](x)
         
-        # Apply final layer with skip connection to first encoder layer
-        if encoder_features and len(encoder_features) > 0:
+        # Apply final decoder block with skip connection to first encoder feature
+        # This will upsample from 128x128 to 256x256
+        if len(encoder_features) >= 1:
+            # Ensure dimensions match before concatenation
             if x.size(2) != encoder_features[0].size(2) or x.size(3) != encoder_features[0].size(3):
                 x = F.interpolate(
                     x,
@@ -258,7 +249,8 @@ class EnhancedCVAE(nn.Module):
             
             # Final concatenation and output layer
             x = torch.cat([x, encoder_features[0]], dim=1)
-        
+            
+        # Apply final layer to generate RGB image
         x = self.final_layer(x)
         
         return x
@@ -403,6 +395,9 @@ class EnhancedCVAE(nn.Module):
     
     def forward(self, x):
         """Forward pass through the Enhanced CVAE"""
+        # For debugging the shape mismatch issue
+        # print(f"Input shape: {x.shape}")
+        
         # Add positional encoding for additional spatial awareness
         # Resize positional encoding if input size doesn't match
         if x.size(2) != self.positional_encoding.size(1) or x.size(3) != self.positional_encoding.size(2):
@@ -414,10 +409,14 @@ class EnhancedCVAE(nn.Module):
             ).squeeze(0)
         else:
             pos_enc = self.positional_encoding
-            
+        
         # Add positional encoding to input for improved spatial sensitivity
-        # (Activated positional encoding to enhance spatial awareness)
-        x_with_pos = torch.cat([x, pos_enc.expand(x.size(0), -1, -1, -1)], dim=1)
+        # Use only the first 3 channels to keep input size reasonable
+        pos_enc_reduced = pos_enc[:3]  # Use only x, y coordinates and radius
+        x_with_pos = torch.cat([x, pos_enc_reduced.expand(x.size(0), -1, -1, -1)], dim=1)
+        
+        # For debugging
+        # print(f"Input with positional encoding shape: {x_with_pos.shape}")
         
         # Encode (using input with positional encoding)
         mu, log_var, encoder_features = self.encode(x_with_pos)
