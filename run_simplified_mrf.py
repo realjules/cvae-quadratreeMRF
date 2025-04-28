@@ -818,19 +818,31 @@ def main():
                       help='Mode: train or validate')
     parser.add_argument('-cp', '--checkpoint', help='Path to model checkpoint for validation',
                       default=None)
+    parser.add_argument('-lp', '--labeled_percentage', default=100, type=int, 
+                      help='Percentage of labeled data to use (10, 30, 75, 100)')
+    parser.add_argument('-s', '--seed', default=42, type=int,
+                      help='Random seed for reproducibility')
     args = parser.parse_args()
+    
+    # Set random seeds for reproducibility
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Create output directory
-    os.makedirs(args.output, exist_ok=True)
+    # Create output directory with percentage in name for experiments
+    if args.labeled_percentage < 100:
+        OUTPUT_FOLDER = f"{args.output}_{args.labeled_percentage}pct_labeled"
+    else:
+        OUTPUT_FOLDER = args.output
+    
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     
     # Parameters
     WINDOW_SIZE = tuple(args.window)
     FOLDER = args.input
-    OUTPUT_FOLDER = args.output
     CVAE_PATH = args.cvae
     BATCH_SIZE = args.batch_size
     EPOCHS = args.epochs
@@ -847,10 +859,27 @@ def main():
     
     # Split data (same as for CVAE)
     train_val_split = int(len(all_ids) * 0.8)
-    train_ids = all_ids[:train_val_split]
+    train_ids_full = all_ids[:train_val_split]
     val_ids = all_ids[train_val_split:]
     
-    print(f"Training IDs: {train_ids}")
+    # For semi-supervised experiments, use only a subset of labeled data
+    labeled_percentage = args.labeled_percentage
+    if labeled_percentage < 100:
+        # Use only a subset of training data as labeled
+        num_labeled = max(1, int(len(train_ids_full) * labeled_percentage / 100))
+        # Instead of sequential selection, we can shuffle for better class representation
+        # But first set the seed for reproducibility
+        rng = np.random.RandomState(args.seed)
+        shuffled_indices = rng.permutation(len(train_ids_full))
+        labeled_indices = shuffled_indices[:num_labeled]
+        
+        # Get the actual labeled IDs
+        train_ids = [train_ids_full[i] for i in labeled_indices]
+        print(f"Using {len(train_ids)} images ({labeled_percentage}%) as labeled data: {train_ids}")
+    else:
+        train_ids = train_ids_full
+        print(f"Using all {len(train_ids)} images (100%) as labeled data")
+    
     print(f"Validation IDs: {val_ids}")
     
     # Create datasets
@@ -887,6 +916,18 @@ def main():
     if args.mode == 'train':
         # Train model
         trainer.train(train_loader, val_loader, EPOCHS, OUTPUT_FOLDER)
+        
+        # Save experiment metadata
+        with open(f"{OUTPUT_FOLDER}/experiment_info.txt", "w") as f:
+            f.write(f"Labeled percentage: {labeled_percentage}%\n")
+            f.write(f"Labeled images: {train_ids}\n")
+            f.write(f"Validation images: {val_ids}\n")
+            f.write(f"Total labeled patches: {len(train_set)}\n")
+            f.write(f"Total validation patches: {len(val_set)}\n")
+            f.write(f"Batch size: {BATCH_SIZE}\n")
+            f.write(f"Learning rate: {LEARNING_RATE}\n")
+            f.write(f"Epochs: {EPOCHS}\n")
+            f.write(f"Random seed: {args.seed}\n")
     else:  # Validate mode
         # Load model
         checkpoint_path = args.checkpoint or f"{OUTPUT_FOLDER}/model_best.pth"
@@ -901,6 +942,13 @@ def main():
         # Run validation
         validate_output_dir = f"{OUTPUT_FOLDER}/validation"
         metrics = trainer.validate(val_loader, validate_output_dir)
+        
+        # Save results to file for easier experiment comparison
+        with open(f"{OUTPUT_FOLDER}/result.txt", "w") as f:
+            f.write(f"Labeled percentage: {labeled_percentage}%\n")
+            f.write(f"Accuracy -> {metrics['accuracy']*100:.2f}%\n")
+            f.write(f"Mean IoU -> {metrics['mean_iou']*100:.2f}%\n")
+            f.write(f"F1 Score -> {metrics['f1_score']*100:.2f}%\n")
 
 
 if __name__ == "__main__":
