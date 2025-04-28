@@ -223,7 +223,12 @@ class QuadtreeMRFTrainer:
                 # If memory is a concern, we can return just the latent code
                 # expanded to a spatial dimension for the QuadtreeMRF
                 z_spatial = z.unsqueeze(-1).unsqueeze(-1)
-                z_spatial = z_spatial.expand(-1, -1, 16, 16)  # Expand to modest spatial size
+                
+                # Size of input images
+                input_size = images.size(-1)
+                # Expand to a reasonable spatial size (1/4 of original size)
+                feature_size = max(16, input_size // 4)
+                z_spatial = z_spatial.expand(-1, -1, feature_size, feature_size)
                 
                 # Simple projection to desired feature dimension
                 if z_spatial.shape[1] != self.feature_dim:
@@ -249,11 +254,17 @@ class QuadtreeMRFTrainer:
                     z = outputs.get('z', None)
                     if z is None:
                         # Last resort: create random features of the right shape
-                        return torch.randn(images.size(0), self.feature_dim, 16, 16, device=self.device) * 0.1
+                        input_size = images.size(-1)
+                        feature_size = max(16, input_size // 4)
+                        return torch.randn(images.size(0), self.feature_dim, feature_size, feature_size, device=self.device) * 0.1
                     
+                    # Size of input images
+                    input_size = images.size(-1)
+                    # Expand to a reasonable spatial size (1/4 of original size)
+                    feature_size = max(16, input_size // 4)
                     # Just use the latent code expanded to spatial dimensions
                     z_spatial = z.unsqueeze(-1).unsqueeze(-1)
-                    z_spatial = z_spatial.expand(-1, -1, 16, 16)
+                    z_spatial = z_spatial.expand(-1, -1, feature_size, feature_size)
                     
                     # Simple projection if needed
                     if z_spatial.shape[1] != self.feature_dim:
@@ -368,9 +379,10 @@ class QuadtreeMRFTrainer:
                 # Forward pass
                 segmentation = self.quadtree_mrf(cvae_features, cvae_features)
                 
-                # Convert segmentation (Long tensor with class indices) to one-hot encoded tensor 
-                # as expected by CrossEntropyLoss
+                # Convert segmentation (Long tensor with class indices) to one-hot encoded tensor
+                # and handle size mismatch
                 batch_size, height, width = segmentation.size()
+                label_height, label_width = labels.size()[1:]
                 
                 # Create empty logits tensor [B, C, H, W]
                 logits = torch.zeros(batch_size, self.n_classes, height, width, device=self.device)
@@ -378,6 +390,14 @@ class QuadtreeMRFTrainer:
                 # For each class, set a high value (10.0) where the segmentation equals that class
                 for c in range(self.n_classes):
                     logits[:, c] = (segmentation == c).float() * 10.0
+                
+                # Resize logits to match the label size if needed
+                if height != label_height or width != label_width:
+                    logits = F.interpolate(
+                        logits, 
+                        size=(label_height, label_width),
+                        mode='nearest'
+                    )
                 
                 # Now we have proper logits that can be used with CrossEntropyLoss
                 loss = self.criterion(logits, labels)
@@ -431,9 +451,10 @@ class QuadtreeMRFTrainer:
                     # Forward pass
                     segmentation = self.quadtree_mrf(cvae_features, cvae_features)
                     
-                    # Convert segmentation (Long tensor with class indices) to one-hot encoded tensor 
-                    # as expected by CrossEntropyLoss
+                    # Convert segmentation (Long tensor with class indices) to one-hot encoded tensor
+                    # and handle size mismatch
                     batch_size, height, width = segmentation.size()
+                    label_height, label_width = labels.size()[1:]
                     
                     # Create empty logits tensor [B, C, H, W]
                     logits = torch.zeros(batch_size, self.n_classes, height, width, device=self.device)
@@ -441,6 +462,14 @@ class QuadtreeMRFTrainer:
                     # For each class, set a high value (10.0) where the segmentation equals that class
                     for c in range(self.n_classes):
                         logits[:, c] = (segmentation == c).float() * 10.0
+                    
+                    # Resize logits to match the label size if needed
+                    if height != label_height or width != label_width:
+                        logits = F.interpolate(
+                            logits, 
+                            size=(label_height, label_width),
+                            mode='nearest'
+                        )
                     
                     # Now we have proper logits that can be used with CrossEntropyLoss
                     loss = self.criterion(logits, labels)
