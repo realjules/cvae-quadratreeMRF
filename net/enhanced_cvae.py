@@ -21,6 +21,18 @@ class EnhancedCVAE(nn.Module):
         super(EnhancedCVAE, self).__init__()
         self.latent_dim = latent_dim
         self.hidden_dims = hidden_dims.copy()  # Create a copy to avoid in-place modification
+        self.input_channels = input_channels
+        self.pos_encoding_channels = 5  # Number of positional encoding channels
+        
+        # Initial projection layer to handle positional encoding
+        # This adapts the input (RGB + positional encoding) to the proper channel count
+        self.input_projection = nn.Conv2d(
+            input_channels + self.pos_encoding_channels,  # 3 (RGB) + 5 (positional encoding) = 8
+            input_channels,  # Project back to 3 channels
+            kernel_size=1,  # 1x1 convolution for channel projection
+            stride=1,
+            padding=0
+        )
         
         # Encoder blocks with access to intermediate features
         self.encoder_blocks = nn.ModuleList()
@@ -154,21 +166,23 @@ class EnhancedCVAE(nn.Module):
         """Encode input images to latent representations with skip connections"""
         # Process through encoder blocks and store intermediate activations
         intermediate_features = []
-        current_x = x
         
-        # To handle the increased input channels from positional encoding
-        # Update first encoder block input channels if needed
-        if x.size(1) > 3:  # If input has more than 3 channels (RGB + positional)
-            # We only process the first N-1 encoder blocks to maintain higher spatial resolution
-            # at the bottleneck (stopping at 8x8 instead of 4x4)
-            for i, block in enumerate(self.encoder_blocks[:-1]):
-                current_x = block(current_x)
-                intermediate_features.append(current_x)
+        # If input has positional encoding channels, apply initial projection
+        if x.size(1) > self.input_channels:  # If input has RGB + positional encoding
+            # Project input with positional encoding to original channel count
+            current_x = self.input_projection(x)
         else:
-            # Standard processing if no positional encoding
-            for block in self.encoder_blocks:
-                current_x = block(current_x)
-                intermediate_features.append(current_x)
+            current_x = x
+        
+        # Process through all encoder blocks
+        for i, block in enumerate(self.encoder_blocks):
+            # For highest resolution at bottleneck, we can stop at second-to-last block
+            # when processing with higher resolution features
+            if i == len(self.encoder_blocks) - 1 and x.size(1) > self.input_channels:
+                break
+                
+            current_x = block(current_x)
+            intermediate_features.append(current_x)
             
         # Flatten final features
         flattened = torch.flatten(current_x, start_dim=1)
@@ -190,9 +204,9 @@ class EnhancedCVAE(nn.Module):
         # Map from latent space to initial decoder volume
         result = self.decoder_input(z)
         
-        # Reshape to spatial volume - fixed 4x4 spatial starting dimensions
+        # Reshape to spatial volume - now using 8x8 spatial starting dimensions
         batch_size = z.size(0)
-        result = result.view(batch_size, self.hidden_dims[-1], 4, 4)
+        result = result.view(batch_size, self.hidden_dims[-1], 8, 8)
         
         # Process through decoder blocks with skip connections
         x = result
@@ -205,31 +219,46 @@ class EnhancedCVAE(nn.Module):
         x = self.decoder_blocks[0](x)
         
         # Apply remaining decoder blocks with skip connections
-        for i in range(1, len(self.decoder_blocks)):
+        # Account for possibly different number of features due to stopping at N-1 blocks
+        max_features = min(len(self.decoder_blocks), len(encoder_features) + 1)
+        
+        for i in range(1, max_features - 1):
+            # Find the corresponding encoder feature index
+            encoder_idx = -(i+1)
+            
+            # Ensure we don't go out of bounds
+            if abs(encoder_idx) > len(encoder_features):
+                continue
+                
+            # Get corresponding encoder features
+            encoder_feat = encoder_features[encoder_idx]
+            
             # Upsample to match encoder feature size if needed
-            if x.size(2) != encoder_features[-(i+1)].size(2) or x.size(3) != encoder_features[-(i+1)].size(3):
+            if x.size(2) != encoder_feat.size(2) or x.size(3) != encoder_feat.size(3):
                 x = F.interpolate(
                     x, 
-                    size=(encoder_features[-(i+1)].size(2), encoder_features[-(i+1)].size(3)),
+                    size=(encoder_feat.size(2), encoder_feat.size(3)),
                     mode='bilinear',
                     align_corners=False
                 )
             
             # Concatenate with corresponding encoder features
-            x = torch.cat([x, encoder_features[-(i+1)]], dim=1)
+            x = torch.cat([x, encoder_feat], dim=1)
             x = self.decoder_blocks[i](x)
         
         # Apply final layer with skip connection to first encoder layer
-        if x.size(2) != encoder_features[0].size(2) or x.size(3) != encoder_features[0].size(3):
-            x = F.interpolate(
-                x,
-                size=(encoder_features[0].size(2), encoder_features[0].size(3)),
-                mode='bilinear',
-                align_corners=False
-            )
+        if encoder_features and len(encoder_features) > 0:
+            if x.size(2) != encoder_features[0].size(2) or x.size(3) != encoder_features[0].size(3):
+                x = F.interpolate(
+                    x,
+                    size=(encoder_features[0].size(2), encoder_features[0].size(3)),
+                    mode='bilinear',
+                    align_corners=False
+                )
+            
+            # Final concatenation and output layer
+            x = torch.cat([x, encoder_features[0]], dim=1)
         
-        # Final concatenation and output layer
-        x = torch.cat([x, encoder_features[0]], dim=1)
         x = self.final_layer(x)
         
         return x
