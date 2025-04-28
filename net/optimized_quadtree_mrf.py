@@ -40,7 +40,7 @@ class OptimizedQuadtreeMRF(nn.Module):
     - Memory-efficient message passing
     - Early stopping and pruning strategies
     """
-    def __init__(self, n_classes=6, quadtree_depth=3, feature_dim=256, max_nodes=2000, 
+    def __init__(self, n_classes=6, quadtree_depth=2, feature_dim=256, max_nodes=500, 
                  device="cuda", batch_processing=True):
         super(OptimizedQuadtreeMRF, self).__init__()
         self.n_classes = n_classes
