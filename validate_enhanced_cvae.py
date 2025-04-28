@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 from skimage import io
-from sklearn.metrics import mean_squared_error, structural_similarity
+from skimage.metrics import structural_similarity
+from sklearn.metrics import mean_squared_error
 import cv2
 
 from net.enhanced_cvae import EnhancedCVAE
