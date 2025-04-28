@@ -25,8 +25,12 @@ def load_model(model_path, input_channels=3, latent_dim=256):
     # Create model instance
     model = EnhancedCVAE(input_channels=input_channels, latent_dim=latent_dim)
     
-    # Load weights
-    model.load_state_dict(torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
+    # Load weights with weights_only=True to address the FutureWarning
+    model.load_state_dict(torch.load(
+        model_path, 
+        map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+        weights_only=True  # Only load the weights, not the entire pickle
+    ))
     
     # Move to GPU if available
     if torch.cuda.is_available():
@@ -57,8 +61,8 @@ def calculate_metrics(original, reconstructed):
     original = np.clip(original, 0, 1)
     reconstructed = np.clip(reconstructed, 0, 1)
     
-    # Calculate MSE
-    mse = mean_squared_error(original, reconstructed)
+    # Calculate MSE manually (sklearn's doesn't handle 3D arrays well)
+    mse = np.mean((original - reconstructed) ** 2)
     
     # Calculate PSNR
     max_pixel = 1.0
