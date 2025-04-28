@@ -92,33 +92,41 @@ class SegmentationDataset(Dataset):
     
     def augment_data(self, image, label):
         """Apply random augmentations to the image and label"""
-        # Convert to HWC format for augmentation
+        # Convert to HWC format for augmentation if image is a tensor
         if torch.is_tensor(image):
-            image_np = image.numpy().transpose(1, 2, 0)
+            image_np = image.cpu().numpy().transpose(1, 2, 0)
         else:
             image_np = image
+            
+        # Convert label to numpy if it's a tensor
+        if torch.is_tensor(label):
+            label_np = label.cpu().numpy()
+        else:
+            label_np = label
         
         # Random horizontal flip
         if np.random.random() > 0.5:
             image_np = np.flip(image_np, axis=1).copy()
-            label = np.flip(label, axis=1).copy()
+            label_np = np.flip(label_np, axis=1).copy()
         
         # Random vertical flip
         if np.random.random() > 0.5:
             image_np = np.flip(image_np, axis=0).copy()
-            label = np.flip(label, axis=0).copy()
+            label_np = np.flip(label_np, axis=0).copy()
         
-        # Random brightness/contrast adjustment
+        # Random brightness/contrast adjustment (image only)
         if np.random.random() > 0.5:
             alpha = 0.8 + 0.4 * np.random.random()  # 0.8 to 1.2
             beta = -0.1 + 0.2 * np.random.random()  # -0.1 to 0.1
             image_np = np.clip(alpha * image_np + beta, 0, 1)
         
-        # Convert back to CHW format
+        # Convert back to tensors
         if torch.is_tensor(image):
             image = torch.from_numpy(image_np.transpose(2, 0, 1)).float()
+            label = torch.from_numpy(label_np).long()
         else:
             image = image_np
+            label = label_np
             
         return image, label
     
@@ -324,11 +332,15 @@ class QuadtreeMRFTrainer:
                 # Forward pass
                 segmentation = self.quadtree_mrf(cvae_features, cvae_features)
                 
-                # Compute loss
-                loss = self.criterion(
-                    torch.nn.functional.one_hot(segmentation, self.n_classes).permute(0, 3, 1, 2).float(),
-                    labels
-                )
+                # Compute loss - need to handle the segmentation output format properly
+                # Convert segmentation to class probabilities format [B, C, H, W]
+                segmentation_probs = torch.zeros(segmentation.size(0), self.n_classes, 
+                                              segmentation.size(1), segmentation.size(2),
+                                              device=self.device)
+                for b in range(segmentation.size(0)):
+                    segmentation_probs[b].scatter_(0, segmentation[b].unsqueeze(0), 1.0)
+                
+                loss = self.criterion(segmentation_probs, labels)
                 
                 # Backward pass
                 self.optimizer.zero_grad()
@@ -369,11 +381,15 @@ class QuadtreeMRFTrainer:
                     # Forward pass
                     segmentation = self.quadtree_mrf(cvae_features, cvae_features)
                     
-                    # Compute loss
-                    loss = self.criterion(
-                        torch.nn.functional.one_hot(segmentation, self.n_classes).permute(0, 3, 1, 2).float(),
-                        labels
-                    )
+                    # Compute loss - need to handle the segmentation output format properly
+                    # Convert segmentation to class probabilities format [B, C, H, W]
+                    segmentation_probs = torch.zeros(segmentation.size(0), self.n_classes, 
+                                                  segmentation.size(1), segmentation.size(2),
+                                                  device=self.device)
+                    for b in range(segmentation.size(0)):
+                        segmentation_probs[b].scatter_(0, segmentation[b].unsqueeze(0), 1.0)
+                    
+                    loss = self.criterion(segmentation_probs, labels)
                     
                     # Update statistics
                     val_loss += loss.item()
