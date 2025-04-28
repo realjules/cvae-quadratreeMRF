@@ -156,6 +156,7 @@ class QuadtreeMRFTrainer:
     """Trainer class for the QuadtreeMRF model with pre-trained CVAE features"""
     def __init__(self, cvae_path, n_classes=6, feature_dim=256, quadtree_depth=3, 
                  learning_rate=0.001, device="cuda"):
+        """Initialize the QuadtreeMRF trainer with a pre-trained CVAE for feature extraction"""
         self.device = device
         self.n_classes = n_classes
         self.feature_dim = feature_dim
@@ -163,13 +164,20 @@ class QuadtreeMRFTrainer:
         # Load pre-trained CVAE
         self.cvae = self._load_cvae(cvae_path, feature_dim)
         
-        # Create QuadtreeMRF model
+        # Create QuadtreeMRF model with proper initialization
         self.quadtree_mrf = OptimizedQuadtreeMRF(
             n_classes=n_classes,
             quadtree_depth=quadtree_depth,
             feature_dim=feature_dim,
             device=device
         ).to(device)
+        
+        # Force model to train mode
+        self.quadtree_mrf.train()
+        
+        # Verify parameters are set to require gradients
+        for param in self.quadtree_mrf.parameters():
+            param.requires_grad = True
         
         # Setup optimizer
         self.optimizer = torch.optim.AdamW(
@@ -245,7 +253,8 @@ class QuadtreeMRFTrainer:
                 else:
                     combined_features = z_spatial
                 
-                return combined_features
+                # Detach these features from the computation graph as they come from the pre-trained CVAE
+                return combined_features.detach()
                 
             except RuntimeError as e:
                 # Memory optimization: if we run out of memory, fall back to a simpler approach
@@ -278,9 +287,11 @@ class QuadtreeMRFTrainer:
                             ).to(self.device)
                         
                         projected = self.linear_proj(z_flat)
-                        return projected.reshape(z_spatial.shape[0], 16, 16, self.feature_dim).permute(0, 3, 1, 2)
+                        # Detach and reshape 
+                        return projected.reshape(z_spatial.shape[0], feature_size, feature_size, self.feature_dim).permute(0, 3, 1, 2).detach()
                     
-                    return z_spatial
+                    # Detach the tensor from the computation graph
+                    return z_spatial.detach()
                 else:
                     # Re-raise other errors
                     raise
@@ -385,12 +396,16 @@ class QuadtreeMRFTrainer:
                 batch_size, height, width = segmentation.size()
                 label_height, label_width = labels.size()[1:]
                 
-                # Create empty logits tensor [B, C, H, W]
-                logits = torch.zeros(batch_size, self.n_classes, height, width, device=self.device)
+                # We'll create the logits directly from segmentation in the next step
                 
-                # For each class, set a high value (10.0) where the segmentation equals that class
-                for c in range(self.n_classes):
-                    logits[:, c] = (segmentation == c).float() * 10.0
+                # Convert segmentation directly to one-hot encoded form and scale by 10
+                # This ensures that the gradient can flow back to the model
+                segmentation_one_hot = torch.nn.functional.one_hot(
+                    segmentation, num_classes=self.n_classes
+                ).float().permute(0, 3, 1, 2)
+                
+                # Scale the one-hot encoded tensor
+                logits = segmentation_one_hot * 10.0
                 
                 # Resize logits to match the label size if needed
                 if height != label_height or width != label_width:
@@ -457,12 +472,16 @@ class QuadtreeMRFTrainer:
                     batch_size, height, width = segmentation.size()
                     label_height, label_width = labels.size()[1:]
                     
-                    # Create empty logits tensor [B, C, H, W]
-                    logits = torch.zeros(batch_size, self.n_classes, height, width, device=self.device)
+                    # We'll create the logits directly from segmentation in the next step
                     
-                    # For each class, set a high value (10.0) where the segmentation equals that class
-                    for c in range(self.n_classes):
-                        logits[:, c] = (segmentation == c).float() * 10.0
+                    # Convert segmentation directly to one-hot encoded form and scale by 10
+                    # This ensures that the gradient can flow back to the model
+                    segmentation_one_hot = torch.nn.functional.one_hot(
+                        segmentation, num_classes=self.n_classes
+                    ).float().permute(0, 3, 1, 2)
+                    
+                    # Scale the one-hot encoded tensor
+                    logits = segmentation_one_hot * 10.0
                     
                     # Resize logits to match the label size if needed
                     if height != label_height or width != label_width:
