@@ -477,10 +477,10 @@ class SegmentationTrainer:
                 logits = self.model(cvae_features)
                 
                 # Resize logits to match label size if needed
-                if logits.shape[2:] != labels.shape:
+                if logits.shape[2:] != labels.shape[1:]:
                     logits = F.interpolate(
                         logits,
-                        size=labels.shape,
+                        size=(labels.shape[1], labels.shape[2]),
                         mode='bilinear',
                         align_corners=False
                     )
@@ -742,10 +742,10 @@ class SegmentationTrainer:
                 logits = self.model(cvae_features)
                 
                 # Resize logits to match label size if needed
-                if logits.shape[2:] != labels.shape:
+                if logits.shape[2:] != labels.shape[1:]:
                     logits = F.interpolate(
                         logits,
-                        size=labels.shape,
+                        size=(labels.shape[1], labels.shape[2]),
                         mode='bilinear',
                         align_corners=False
                     )
