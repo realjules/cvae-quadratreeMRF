@@ -6,6 +6,7 @@ as a feature extractor for aerial image segmentation.
 """
 
 import torch
+import torch.nn.functional as F
 import argparse
 import os
 import matplotlib.pyplot as plt
