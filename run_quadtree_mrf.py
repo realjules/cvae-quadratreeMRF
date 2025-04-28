@@ -368,10 +368,19 @@ class QuadtreeMRFTrainer:
                 # Forward pass
                 segmentation = self.quadtree_mrf(cvae_features, cvae_features)
                 
-                # Compute loss - need to handle the segmentation output format properly
-                # Simpler and more memory-efficient loss calculation
-                # Use cross entropy loss directly with class indices
-                loss = self.criterion(segmentation, labels)
+                # Convert segmentation (Long tensor with class indices) to one-hot encoded tensor 
+                # as expected by CrossEntropyLoss
+                batch_size, height, width = segmentation.size()
+                
+                # Create empty logits tensor [B, C, H, W]
+                logits = torch.zeros(batch_size, self.n_classes, height, width, device=self.device)
+                
+                # For each class, set a high value (10.0) where the segmentation equals that class
+                for c in range(self.n_classes):
+                    logits[:, c] = (segmentation == c).float() * 10.0
+                
+                # Now we have proper logits that can be used with CrossEntropyLoss
+                loss = self.criterion(logits, labels)
                 
                 # Backward pass
                 self.optimizer.zero_grad()
@@ -422,10 +431,19 @@ class QuadtreeMRFTrainer:
                     # Forward pass
                     segmentation = self.quadtree_mrf(cvae_features, cvae_features)
                     
-                    # Compute loss - need to handle the segmentation output format properly
-                    # Simpler and more memory-efficient loss calculation
-                    # Use cross entropy loss directly with class indices
-                    loss = self.criterion(segmentation, labels)
+                    # Convert segmentation (Long tensor with class indices) to one-hot encoded tensor 
+                    # as expected by CrossEntropyLoss
+                    batch_size, height, width = segmentation.size()
+                    
+                    # Create empty logits tensor [B, C, H, W]
+                    logits = torch.zeros(batch_size, self.n_classes, height, width, device=self.device)
+                    
+                    # For each class, set a high value (10.0) where the segmentation equals that class
+                    for c in range(self.n_classes):
+                        logits[:, c] = (segmentation == c).float() * 10.0
+                    
+                    # Now we have proper logits that can be used with CrossEntropyLoss
+                    loss = self.criterion(logits, labels)
                     
                     # Update statistics
                     val_loss += loss.item()
