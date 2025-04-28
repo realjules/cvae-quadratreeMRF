@@ -13,8 +13,11 @@ class EnhancedCVAE(nn.Module):
     - Enhanced projection head
     - Perceptual loss capability
     - Structural consistency
+    - Increased network capacity
+    - Spatial latent representation
+    - Improved contrastive learning
     """
-    def __init__(self, input_channels=3, latent_dim=256, hidden_dims=[32, 64, 128, 256]):
+    def __init__(self, input_channels=3, latent_dim=512, hidden_dims=[64, 128, 256, 512]):
         super(EnhancedCVAE, self).__init__()
         self.latent_dim = latent_dim
         self.hidden_dims = hidden_dims.copy()  # Create a copy to avoid in-place modification
@@ -36,18 +39,22 @@ class EnhancedCVAE(nn.Module):
             in_channels = h_dim
             
         # Calculate output size for a 256x256 input after stride-2 convolutions
-        self.output_height = 256 // (2 ** len(hidden_dims))  # 16 for default hidden_dims
-        self.output_width = 256 // (2 ** len(hidden_dims))   # 16 for default hidden_dims
+        # We now use first 3 downsampling blocks instead of 4 to maintain higher resolution
+        # at the bottleneck (8x8 instead of 4x4)
+        self.output_height = 256 // (2 ** (len(hidden_dims)-1))  # 8 for new hidden_dims
+        self.output_width = 256 // (2 ** (len(hidden_dims)-1))   # 8 for new hidden_dims
         self.output_features = hidden_dims[-1]
         
         # Total flattened size
         flatten_size = self.output_features * self.output_height * self.output_width
         
         # Latent space with variational info bottleneck
+        # Increased latent dimension for richer representation
         self.fc_mu = nn.Linear(flatten_size, latent_dim)
         self.fc_log_var = nn.Linear(flatten_size, latent_dim)
         
         # Enhanced projection head for contrastive learning (3-layer MLP)
+        # Using larger dimensions for projection to maintain expressivity
         self.projection_head = nn.Sequential(
             nn.Linear(latent_dim, latent_dim),
             nn.BatchNorm1d(latent_dim),
@@ -58,8 +65,8 @@ class EnhancedCVAE(nn.Module):
             nn.Linear(latent_dim // 2, latent_dim // 4)
         )
         
-        # Decoder input
-        self.decoder_input = nn.Linear(latent_dim, hidden_dims[-1] * 4 * 4)
+        # Decoder input - increased spatial resolution at bottleneck
+        self.decoder_input = nn.Linear(latent_dim, hidden_dims[-1] * 8 * 8)
         
         # Reverse hidden dims for decoder
         hidden_dims_reversed = hidden_dims[::-1]
@@ -99,8 +106,9 @@ class EnhancedCVAE(nn.Module):
             nn.Sigmoid()
         )
         
-        # Memory bank for contrastive learning (larger bank)
-        self.register_buffer("queue", torch.randn(512, latent_dim // 4))
+        # Greatly increased memory bank size for contrastive learning
+        # 4096 items instead of 512 for better representation of dataset distribution
+        self.register_buffer("queue", torch.randn(4096, latent_dim // 4))
         self.queue = F.normalize(self.queue, dim=1)
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
         
@@ -108,6 +116,7 @@ class EnhancedCVAE(nn.Module):
         self.init_perceptual_network()
         
         # Positional encoding for spatial awareness
+        # Creating higher-resolution positional encoding for better spatial detail
         self.register_buffer("positional_encoding", self.create_positional_encoding(256, 256))
         
     def init_perceptual_network(self):
@@ -119,13 +128,26 @@ class EnhancedCVAE(nn.Module):
             param.requires_grad = False
             
     def create_positional_encoding(self, height, width):
-        """Create positional encoding for spatial awareness"""
-        # Create coordinate grid
+        """Create enhanced positional encoding for spatial awareness"""
+        # Create coordinate grid (basic x,y coordinates)
         y_coords = torch.linspace(-1, 1, height).view(-1, 1).expand(-1, width)
         x_coords = torch.linspace(-1, 1, width).expand(height, -1)
         
-        # Stack coordinates
-        coords = torch.stack([y_coords, x_coords], dim=0)
+        # Add radial distance from center
+        center_y, center_x = height // 2, width // 2
+        y_grid = torch.arange(height).view(-1, 1).expand(-1, width).float() - center_y
+        x_grid = torch.arange(width).expand(height, -1).float() - center_x
+        
+        radius = torch.sqrt((y_grid / center_y) ** 2 + (x_grid / center_x) ** 2)
+        
+        # Add periodic functions for better spatial representation
+        # Scale these based on image size to create the right frequency
+        freq_factor = 2.0 * 3.14159 / max(height, width)
+        sin_x = torch.sin(x_grid * freq_factor * 4)  # Higher frequency for finer details
+        sin_y = torch.sin(y_grid * freq_factor * 4)
+        
+        # Stack all positional encodings (now 5 channels)
+        coords = torch.stack([y_coords, x_coords, radius, sin_y, sin_x], dim=0)
         return coords
         
     def encode(self, x):
@@ -134,9 +156,19 @@ class EnhancedCVAE(nn.Module):
         intermediate_features = []
         current_x = x
         
-        for block in self.encoder_blocks:
-            current_x = block(current_x)
-            intermediate_features.append(current_x)
+        # To handle the increased input channels from positional encoding
+        # Update first encoder block input channels if needed
+        if x.size(1) > 3:  # If input has more than 3 channels (RGB + positional)
+            # We only process the first N-1 encoder blocks to maintain higher spatial resolution
+            # at the bottleneck (stopping at 8x8 instead of 4x4)
+            for i, block in enumerate(self.encoder_blocks[:-1]):
+                current_x = block(current_x)
+                intermediate_features.append(current_x)
+        else:
+            # Standard processing if no positional encoding
+            for block in self.encoder_blocks:
+                current_x = block(current_x)
+                intermediate_features.append(current_x)
             
         # Flatten final features
         flattened = torch.flatten(current_x, start_dim=1)
@@ -342,7 +374,7 @@ class EnhancedCVAE(nn.Module):
     
     def forward(self, x):
         """Forward pass through the Enhanced CVAE"""
-        # Add positional encoding if needed for additional spatial awareness
+        # Add positional encoding for additional spatial awareness
         # Resize positional encoding if input size doesn't match
         if x.size(2) != self.positional_encoding.size(1) or x.size(3) != self.positional_encoding.size(2):
             pos_enc = F.interpolate(
@@ -354,11 +386,12 @@ class EnhancedCVAE(nn.Module):
         else:
             pos_enc = self.positional_encoding
             
-        # Optional: add positional encoding to input for improved spatial sensitivity
-        # x_with_pos = torch.cat([x, pos_enc.expand(x.size(0), -1, -1, -1)], dim=1)
+        # Add positional encoding to input for improved spatial sensitivity
+        # (Activated positional encoding to enhance spatial awareness)
+        x_with_pos = torch.cat([x, pos_enc.expand(x.size(0), -1, -1, -1)], dim=1)
         
-        # Encode
-        mu, log_var, encoder_features = self.encode(x)
+        # Encode (using input with positional encoding)
+        mu, log_var, encoder_features = self.encode(x_with_pos)
         
         # Sample latent
         z = self.reparameterize(mu, log_var)
@@ -395,8 +428,8 @@ class EnhancedCVAE(nn.Module):
             'encoder_features': encoder_features
         }
     
-    def contrastive_loss(self, z_proj, labels=None, temperature=0.07):
-        """Enhanced contrastive loss with memory bank support"""
+    def contrastive_loss(self, z_proj, labels=None, temperature=0.05):
+        """Enhanced contrastive loss with improved memory bank support"""
         batch_size = z_proj.size(0)
         device = z_proj.device
         
@@ -404,19 +437,34 @@ class EnhancedCVAE(nn.Module):
         z_proj_norm = F.normalize(z_proj, dim=1)
         
         # Compute cosine similarity matrix with lower temperature for sharper contrasts
+        # Reduced temperature from 0.07 to 0.05 for sharper distinctions
         sim_matrix = torch.mm(z_proj_norm, z_proj_norm.t()) / temperature
         
-        # Include memory bank if available
+        # Include enhanced memory bank
         queue = self.queue.clone().detach()
         
-        # Calculate similarities with queue
+        # Calculate similarities with larger queue (now 4096 items)
         queue_sim = torch.mm(z_proj_norm, queue.t()) / temperature
         
+        # Apply hard negative mining - identify difficult negatives
+        # These are samples that are close in embedding space but should be different
+        with torch.no_grad():
+            # Find hardest negatives in current batch (highest similarity excluding self)
+            hard_indices = torch.argsort(sim_matrix, dim=1, descending=True)
+            # Remove self-similarity
+            hard_indices = hard_indices[:, 1:int(batch_size * 0.25) + 1]  # Top 25% hardest
+        
+        # Weight harder negatives more in the loss calculation
+        hard_weights = torch.ones(batch_size, batch_size + queue.shape[0], device=device)
+        for i in range(batch_size):
+            # Increase weight for hard negatives (in batch)
+            hard_weights[i, hard_indices[i]] = 2.0
+            
         # Combine for full similarity matrix
         sim_matrix_expanded = torch.cat([sim_matrix, queue_sim], dim=1)
         
         if labels is not None:
-            # Supervised contrastive loss
+            # Enhanced supervised contrastive loss
             pos_mask = labels.unsqueeze(1) == labels.unsqueeze(0)
             pos_mask = pos_mask.float()
             
@@ -433,19 +481,29 @@ class EnhancedCVAE(nn.Module):
             if valid_samples.sum() == 0:
                 return torch.tensor(0.0, device=device)
             
-            # Log probabilities and loss calculation with temperature scaling
-            log_prob = F.log_softmax(sim_matrix_expanded, dim=1)[:, :batch_size]
-            mean_log_prob_pos = (pos_mask * log_prob).sum(1) / num_pos.clamp(min=1)
+            # Enhanced log probabilities with hard negative weighting
+            weighted_sim = sim_matrix_expanded * hard_weights
+            log_prob = F.log_softmax(weighted_sim, dim=1)[:, :batch_size]
+            
+            # Apply focal loss modification to emphasize harder examples
+            focal_weight = (1 - torch.exp(log_prob)) ** 2  # squared focal term
+            weighted_log_prob = focal_weight * log_prob
+            
+            # Compute final supervised loss
+            mean_log_prob_pos = (pos_mask * weighted_log_prob).sum(1) / num_pos.clamp(min=1)
             loss = -mean_log_prob_pos[valid_samples].mean()
         else:
-            # Unsupervised contrastive loss (InfoNCE)
+            # Enhanced unsupervised contrastive loss (InfoNCE)
             labels = torch.arange(batch_size, device=device)
             
             # Mask out self-comparisons
             sim_matrix_no_diag = sim_matrix - torch.eye(batch_size, device=device) * 1e9
             
-            # Standard cross entropy loss
-            loss = F.cross_entropy(sim_matrix_no_diag, labels)
+            # Apply weighted cross entropy with hard negative emphasis
+            weighted_sim_no_diag = sim_matrix_no_diag * hard_weights[:, :batch_size]
+            
+            # Standard cross entropy loss with improved weighting
+            loss = F.cross_entropy(weighted_sim_no_diag, labels)
         
         return loss
 

@@ -17,7 +17,7 @@ BASE_EXPERIMENT_NAME = "SimplifiedMRF"
 EPOCHS = 30
 BATCH_SIZE = 4
 LEARNING_RATE = 0.001
-LATENT_DIM = 256
+LATENT_DIM = 512
 SEED = 42
 
 # Make sure output directory exists

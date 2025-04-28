@@ -895,7 +895,7 @@ def main():
     parser.add_argument('-b', '--batch_size', default=4, type=int, help='Batch size')
     parser.add_argument('-lr', '--learning_rate', default=0.001, type=float, help='Learning rate')
     parser.add_argument('-e', '--epochs', default=30, type=int, help='Number of epochs')
-    parser.add_argument('-ld', '--latent_dim', default=256, type=int, help='CVAE latent dimension')
+    parser.add_argument('-ld', '--latent_dim', default=512, type=int, help='CVAE latent dimension')
     parser.add_argument('-nc', '--n_classes', default=6, type=int, help='Number of classes')
     parser.add_argument('-m', '--mode', choices=['train', 'validate'], default='train',
                       help='Mode: train or validate')
@@ -993,10 +993,12 @@ def main():
     )
     
     # Create trainer
+    # Ensure feature_dim matches the enhanced CVAE latent dimension
+    # If we've increased CVAE latent_dim to 512, make sure this matches
     trainer = SegmentationTrainer(
         cvae_path=CVAE_PATH,
         n_classes=N_CLASSES,
-        feature_dim=LATENT_DIM,
+        feature_dim=LATENT_DIM,  # This should match the CVAE latent_dim
         learning_rate=LEARNING_RATE,
         device=device
     )

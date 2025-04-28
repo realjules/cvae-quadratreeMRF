@@ -460,8 +460,10 @@ def main():
     # Data paths
     DATA_FOLDER = f"{FOLDER}/top/top_mosaic_09cm_area{{}}.tif"
     
-    # Create CVAE model
-    cvae = EnhancedCVAE(input_channels=IN_CHANNELS, latent_dim=LATENT_DIM)
+    # Create CVAE model with enhanced parameters
+    # Using increased latent dimension and larger feature maps as implemented in the enhanced model
+    cvae = EnhancedCVAE(input_channels=IN_CHANNELS, latent_dim=LATENT_DIM, 
+                       hidden_dims=[64, 128, 256, 512])
     
     # Initialize loss function
     criterion = EnhancedCVAELoss(
