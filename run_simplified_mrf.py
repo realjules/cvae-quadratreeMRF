@@ -13,6 +13,7 @@ import argparse
 import os
 import matplotlib.pyplot as plt
 import numpy as np
+import random
 from tqdm import tqdm
 from skimage import io
 from sklearn.metrics import accuracy_score, jaccard_score, f1_score
@@ -20,6 +21,8 @@ import cv2
 
 from net.enhanced_cvae import EnhancedCVAE
 from torch.utils.data import Dataset, DataLoader
+# Import advanced augmentation functions
+from utils.utils_dataset import elastic_transform, get_augmentation_transforms, cutmix_augmentation
 
 # Configure PyTorch for deterministic behavior
 torch.backends.cudnn.deterministic = True
@@ -29,14 +32,17 @@ np.random.seed(42)
 
 
 class SegmentationDataset(Dataset):
-    """Dataset for semantic segmentation with ground truth labels"""
-    def __init__(self, ids, image_files, label_files, window_size=(256, 256), augment=True, stride=None):
+    """Dataset for semantic segmentation with ground truth labels and enhanced augmentation"""
+    def __init__(self, ids, image_files, label_files, window_size=(256, 256), augment=True, 
+                 stride=None, enable_cutmix=True, cutmix_prob=0.3):
         self.ids = ids
         self.image_files = image_files
         self.label_files = label_files
         self.window_size = window_size
         self.augment = augment
         self.stride = stride if stride is not None else window_size[0] // 2  # Default to 50% overlap
+        self.enable_cutmix = enable_cutmix
+        self.cutmix_prob = cutmix_prob
         
         # Load data
         self.images = []
@@ -87,10 +93,10 @@ class SegmentationDataset(Dataset):
                 for j in range(0, width - window_size[1] + 1, self.stride):
                     self.windows.append((img_idx, i, j))
         
-        print(f"Dataset created with {len(self.windows)} patches from {len(self.images)} images")
+        print(f"Dataset created with {len(self.windows)} patches from {len(self.images)} images with enhanced augmentation")
     
     def augment_data(self, image, label):
-        """Apply random augmentations to the image and label"""
+        """Apply enhanced random augmentations to the image and label"""
         # Convert to HWC format for augmentation if image is a tensor
         if torch.is_tensor(image):
             image_np = image.cpu().numpy().transpose(1, 2, 0)
@@ -119,15 +125,57 @@ class SegmentationDataset(Dataset):
             beta = -0.1 + 0.2 * np.random.random()  # -0.1 to 0.1
             image_np = np.clip(alpha * image_np + beta, 0, 1)
         
-        # Convert back to tensors
-        if torch.is_tensor(image):
-            image = torch.from_numpy(image_np.transpose(2, 0, 1)).float()
-            label = torch.from_numpy(label_np).long()
-        else:
-            image = image_np
-            label = label_np
+        # Convert to tensors for intermediate processing
+        image_tensor = torch.from_numpy(image_np.transpose(2, 0, 1)).float()
+        label_tensor = torch.from_numpy(label_np).long()
+        
+        # ENHANCED AUGMENTATIONS:
+        
+        # 1. Apply elastic transform with 30% probability
+        if np.random.random() > 0.7:
+            image_tensor, label_tensor = elastic_transform(
+                image_tensor, label_tensor, 
+                alpha=50 + np.random.random() * 50,  # 50-100 range for alpha
+                sigma=4 + np.random.random() * 2     # 4-6 range for sigma
+            )
+        
+        # 2. Apply color augmentations with 40% probability
+        if np.random.random() > 0.6:
+            # Get color transform
+            color_transform = get_augmentation_transforms(p=0.8)
+            # Apply only to the image (not the label)
+            image_tensor = color_transform(image_tensor)
+        
+        # 3. Random rotation with 20% probability
+        if np.random.random() > 0.8:
+            angle = np.random.randint(-30, 30)  # -30 to +30 degrees
             
-        return image, label
+            # Convert tensors back to numpy for rotation
+            if torch.is_tensor(image_tensor):
+                rot_img = image_tensor.permute(1, 2, 0).cpu().numpy()
+            else:
+                rot_img = image_tensor.transpose(1, 2, 0)
+                
+            if torch.is_tensor(label_tensor):
+                rot_label = label_tensor.cpu().numpy()
+            else:
+                rot_label = label_tensor
+            
+            # Apply rotation
+            center = (rot_img.shape[1] // 2, rot_img.shape[0] // 2)
+            rot_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+            
+            rot_img = cv2.warpAffine(rot_img, rot_matrix, (rot_img.shape[1], rot_img.shape[0]), 
+                                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+            rot_label = cv2.warpAffine(rot_label, rot_matrix, (rot_label.shape[1], rot_label.shape[0]), 
+                                    flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_REFLECT)
+            
+            # Convert back to tensors
+            image_tensor = torch.from_numpy(rot_img.transpose(2, 0, 1)).float()
+            label_tensor = torch.from_numpy(rot_label).long()
+        
+        # Return the final augmented tensors
+        return image_tensor, label_tensor
     
     def __len__(self):
         return len(self.windows)
@@ -146,9 +194,40 @@ class SegmentationDataset(Dataset):
         image_patch = torch.from_numpy(image_patch).float()
         label_patch = torch.from_numpy(label_patch).long()
         
-        # Apply augmentations during training
+        # Apply standard augmentations during training
         if self.augment:
             image_patch, label_patch = self.augment_data(image_patch, label_patch)
+            
+            # Apply CutMix augmentation if enabled and we have more than one image
+            # This is especially important for low-data regimes
+            if self.enable_cutmix and len(self.images) > 1 and random.random() < self.cutmix_prob:
+                # Get a random second sample from the dataset
+                second_idx = random.randint(0, len(self.windows) - 1)
+                if second_idx != idx:  # Make sure it's different from current
+                    second_img_idx, second_i, second_j = self.windows[second_idx]
+                    second_image = self.images[second_img_idx]
+                    second_label = self.labels[second_img_idx]
+                    
+                    # Extract window
+                    second_image_patch = second_image[second_i:second_i+self.window_size[0], 
+                                                   second_j:second_j+self.window_size[1], :]
+                    second_label_patch = second_label[second_i:second_i+self.window_size[0], 
+                                                   second_j:second_j+self.window_size[1]]
+                    
+                    # Convert to torch format
+                    second_image_patch = np.transpose(second_image_patch, (2, 0, 1))
+                    second_image_patch = torch.from_numpy(second_image_patch).float()
+                    second_label_patch = torch.from_numpy(second_label_patch).long()
+                    
+                    # Apply standard augmentation to second patch
+                    second_image_patch, second_label_patch = self.augment_data(second_image_patch, second_label_patch)
+                    
+                    # Apply CutMix between the two patches
+                    image_patch, label_patch = cutmix_augmentation(
+                        image_patch, label_patch, 
+                        second_image_patch, second_label_patch, 
+                        alpha=0.5
+                    )
         
         return image_patch, label_patch
 
@@ -885,11 +964,16 @@ def main():
     # Create datasets
     if args.mode == 'train':
         train_set = SegmentationDataset(
-            train_ids, IMAGE_FILES, LABEL_FILES, WINDOW_SIZE, augment=True
+            train_ids, IMAGE_FILES, LABEL_FILES, WINDOW_SIZE, 
+            augment=True, 
+            enable_cutmix=True,
+            cutmix_prob=0.3  # 30% chance of applying CutMix augmentation
         )
     
     val_set = SegmentationDataset(
-        val_ids, IMAGE_FILES, LABEL_FILES, WINDOW_SIZE, augment=False
+        val_ids, IMAGE_FILES, LABEL_FILES, WINDOW_SIZE, 
+        augment=False,
+        enable_cutmix=False
     )
     
     # Create data loaders
