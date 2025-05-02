@@ -1,93 +1,15 @@
-# CVAE-QuadtreeMRF Improvements Documentation
+Execution Plan
 
-## Original Implementation Issues
-
-Our initial model implementation achieved only ~21.5% validation accuracy after 12 hours of training, with signs of instability:
-
-1. **CVAE Component:**
-   - Fixed input size assumption (256x256)
-   - Simple projection head for contrastive learning
-   - No skip connections between encoder and decoder
-   - Basic reconstruction loss without structural awareness
-
-2. **QuadtreeMRF Component:**
-   - Inefficient belief propagation (5 iterations)
-   - Excessive node splitting causing memory issues
-   - Numerical instability in message passing
-   - Slow spatial adjacency computation
-
-3. **Network Architecture:**
-   - Basic feature fusion without attention
-   - Simple decoder blocks with limited capacity
-   - Fixed-weight loss components
-   - Gradient instability (spikes over 250)
-
-4. **Training Process:**
-   - Basic Adam optimizer
-   - Simple step-based LR scheduler
-   - No early stopping mechanism
-   - Limited data augmentation
-
-## Implemented Improvements
-
-We implemented the following improvements to boost performance toward our 85%+ accuracy target:
-
-1. **Enhanced CVAE:**
-   - Added spatial attention mechanisms
-   - Implemented U-Net style skip connections
-   - Enhanced projection head (3-layer MLP)
-   - Added memory bank for contrastive learning
-   - Implemented positional encoding for spatial awareness
-   - Added instance normalization for better stability
-
-2. **Optimized QuadtreeMRF:**
-   - Reduced BP iterations from 5 to 3 with log-space operations
-   - Added node count limiting for efficient memory usage
-   - Improved feature projections with BatchNorm
-   - Implemented efficient spatial adjacency computation
-   - Enhanced error handling with graceful fallbacks
-
-3. **Improved Network Architecture:**
-   - Added Feature Pyramid Network (FPN) for multi-scale feature fusion
-   - Implemented residual connections for better gradient flow
-   - Added boundary-aware processing module
-   - Enhanced feature fusion with attention mechanisms
-   - Implemented multi-level supervision with adaptive weighting
-
-4. **Enhanced Loss Functions:**
-   - Implemented Focal Loss for class imbalance
-   - Added Lovasz-Softmax loss for direct IoU optimization
-   - Created adaptive loss weighting based on training progress
-   - Enhanced structural similarity for reconstruction loss
-   - Improved hierarchical consistency with Jensen-Shannon divergence
-
-5. **Training Optimizations:**
-   - Implemented mixed precision training with gradient scaling
-   - Added early stopping to prevent overfitting
-   - Reduced gradient clipping from 10.0 to 1.0
-   - Implemented OneCycleLR with warmup for faster convergence
-   - Added enhanced data augmentation (elastic transforms, CutMix)
-   - Replaced Adam with AdamW (decoupled weight decay)
-
-## Expected Outcomes
-
-These improvements target key weaknesses in the original implementation:
-
-1. **Performance:** Significant accuracy increase from ~21.5% toward 85%+
-2. **Stability:** Reduced gradient fluctuations and smoother loss curves
-3. **Convergence:** Faster training with fewer epochs required
-4. **Memory Efficiency:** Reduced memory usage despite increased model capacity
-5. **Robustness:** Better generalization to unseen data
-
-The most significant gains come from the improved contrastive learning, optimized belief propagation, and direct IoU optimization through Lovasz-Softmax loss.
-
-## Recommended Configuration
-
-For optimal results, use:
-- Batch size: 8 (reduced from 10)
-- Latent dimension: 256 (increased from 128)
-- QuadTree depth: 3 (reduced from 4)
-- Learning rate: 0.001 with OneCycleLR scheduling
-- Contrastive weight: 0.5 (increased from 0.1)
-- KLD weight: 0.001 (reduced from 0.005)
-- Consistency weight: 0.2 (increased from 0.05)
+  1. First Implementation: Start with the improved feature integration (Phases 2 and 4)
+    - This will provide the biggest improvement with minimal changes
+    - Focus on replacing simple upsampling with proper decoder and attention fusion
+  2. Second Implementation: Enhance CVAE training (Phase 1)
+    - Train a new CVAE with higher contrastive weight
+    - Implement supervised contrastive loss when labels are available
+  3. Third Implementation: Enhance SimplifiedMRF with cross-scale attention (Phases 3 and 5)
+    - Add cross-scale attention to improve hierarchical connections
+    - This will help the model better utilize the improved features
+  4. Testing and Tuning:
+    - Compare performance against baseline at each phase
+    - Adjust hyperparameters as needed
+    - Focus on improved mIoU for the challenging classes mentioned in your midterm report
