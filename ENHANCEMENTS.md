@@ -123,7 +123,7 @@ All implementations follow the same architectural principles as the existing cod
 - Models are designed to be drop-in replacements for their counterparts in the original implementation.
 - Careful attention has been paid to computational efficiency, with optional parameters to control memory usage.
 
-### Loss Functions
+### Loss Functions 
 - Enhanced loss functions with adaptive weighting based on training progress.
 - Support for both supervised and unsupervised training modes.
 - Comprehensive loss component tracking for analysis.
