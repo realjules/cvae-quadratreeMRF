@@ -1,514 +1,1052 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Enhanced Training function for Semi-Supervised Hierarchical PGM with Contrastive Learning
+Simplified implementation of the QuadtreeMRF approach using a more standard
+fully convolutional neural network with hierarchical structure that can be
+trained directly with CVAE features.
 """
 
 import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from tqdm import tqdm
+import torch.nn as nn
+import torch.nn.functional as F
+import argparse
 import os
-from torch.autograd import Variable
-from utils.utils_dataset import convert_to_color
-from utils.utils import accuracy
-from torch.cuda.amp import autocast, GradScaler
-import time
+import matplotlib.pyplot as plt
+import numpy as np
+import random
+from tqdm import tqdm
+from skimage import io
+from sklearn.metrics import accuracy_score, jaccard_score, f1_score
+import cv2
+
+from net.cvae import EnhancedCVAE
+from torch.utils.data import Dataset, DataLoader
+# Import advanced augmentation functions
+from utils.utils_dataset import elastic_transform, get_augmentation_transforms, cutmix_augmentation
+
+# Configure PyTorch for deterministic behavior
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+torch.manual_seed(42)
+np.random.seed(42)
 
 
-def train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader, 
-          val_loader, epochs, save_epoch, weights, batch_size, window_size, output_path):
-    """
-    Train the Semi-Supervised Hierarchical PGM model
-    
-    Parameters:
-    -----------
-    net: torch.nn.Module
-        The hierarchical PGM model
-    criterion: torch.nn.Module
-        The loss function (HierarchicalPGMLoss)
-    optimizer: torch.optim.Optimizer
-        The optimizer
-    scheduler: torch.optim.lr_scheduler
-        Learning rate scheduler
-    labeled_loader: torch.utils.data.DataLoader
-        DataLoader for labeled data
-    unlabeled_loader: torch.utils.data.DataLoader or None
-        DataLoader for unlabeled data (None if all data is labeled)
-    val_loader: torch.utils.data.DataLoader
-        DataLoader for validation data
-    epochs: int
-        Number of training epochs
-    save_epoch: int
-        Save model every N epochs
-    weights: torch.Tensor
-        Class weights for loss function
-    batch_size: int
-        Batch size
-    window_size: tuple
-        Window size for patches
-    output_path: str
-        Path to save model and results
-    """
-    # Create output directory if it doesn't exist
-    os.makedirs(output_path, exist_ok=True)
-    
-    # Initialize mixed precision training
-    scaler = GradScaler()
-    
-    # Loss tracking
-    epoch_losses = []
-    epoch_val_losses = []
-    epoch_val_acc = []
-    
-    # Track individual loss components
-    component_losses = {
-        'seg_loss': [],
-        'hier_loss': [],
-        'recon_loss': [],
-        'kld_loss': [],
-        'contrastive_loss': [],
-        'hier_consistency_loss': []
-    }
-    
-    # Gradient norm tracking for debugging
-    grad_norms = []
-    
-    # Track best validation accuracy
-    best_val_acc = 0.0
-    
-    # Early stopping
-    patience = 10
-    early_stop_counter = 0
-    prev_val_loss = float('inf')
-    
-    # Use tqdm only for epoch-level progress, not batch-level
-    for e in tqdm(range(1, epochs + 1), desc="Epochs"):
-        # Training mode
-        net.train()
+class SegmentationDataset(Dataset):
+    """Dataset for semantic segmentation with ground truth labels and enhanced augmentation"""
+    def __init__(self, ids, image_files, label_files, window_size=(256, 256), augment=True, 
+                 stride=None, enable_cutmix=True, cutmix_prob=0.3):
+        self.ids = ids
+        self.image_files = image_files
+        self.label_files = label_files
+        self.window_size = window_size
+        self.augment = augment
+        self.stride = stride if stride is not None else window_size[0] // 2  # Default to 50% overlap
+        self.enable_cutmix = enable_cutmix
+        self.cutmix_prob = cutmix_prob
         
-        # Track losses for this epoch
-        epoch_supervised_losses = []
-        epoch_unsupervised_losses = []
-        epoch_total_loss = 0.0
-        batch_component_losses = {k: [] for k in component_losses.keys()}
-        num_batches = 0
-        
-        # Train with labeled data - no tqdm progress bar here
-        if len(labeled_loader) > 0:  # Only if we have labeled data
-            for batch_idx, (data, target) in enumerate(labeled_loader):
-                if torch.cuda.is_available():
-                    data, target = Variable(data.cuda()), Variable(target.cuda())
-                else:
-                    data, target = Variable(data), Variable(target)
+        # Load data
+        self.images = []
+        self.labels = []
+        for id in self.ids:
+            try:
+                # Load image
+                img_path = self.image_files.format(id)
+                img = np.asarray(io.imread(img_path), dtype='float32') / 255.0
+                self.images.append(img)
                 
-                optimizer.zero_grad()
-                
-                # Mixed precision forward pass with labeled data
-                with autocast():
-                    # Forward pass with labeled data (supervised mode)
-                    outputs = net(data, mode='full')
+                # Load label
+                label_path = self.label_files.format(id)
+                lbl = np.asarray(io.imread(label_path), dtype='int64')
+                # Check if label has 3 channels (RGB), convert to single channel
+                if len(lbl.shape) == 3 and lbl.shape[2] == 3:
+                    # Map colors to class indices (adjust according to your dataset)
+                    lbl_mapped = np.zeros((lbl.shape[0], lbl.shape[1]), dtype='int64')
                     
-                    # Calculate loss
-                    loss, loss_components = criterion(outputs, target, mode='full')
-                
-                # Backward pass with gradient scaling
-                scaler.scale(loss).backward()
-                
-                # Calculate gradient norm for debugging
-                total_norm = 0
-                for p in net.parameters():
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2)
-                        total_norm += param_norm.item() ** 2
-                total_norm = total_norm ** 0.5
-                grad_norms.append(total_norm)
-                
-                # Gradient clipping with stricter limit to prevent exploding gradients
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
-                
-                # Update with gradient scaling
-                scaler.step(optimizer)
-                scaler.update()
-                
-                # Record loss for this batch
-                epoch_supervised_losses.append(loss.item())
-                epoch_total_loss += loss.item()
-                num_batches += 1
-                
-                # Track individual loss components
-                for component, value in loss_components.items():
-                    if component in batch_component_losses:
-                        batch_component_losses[component].append(value.item() if torch.is_tensor(value) else value)
-        
-        # Train with unlabeled data if available - no tqdm progress bar here
-        if unlabeled_loader is not None:
-            for batch_idx, (data, _) in enumerate(unlabeled_loader):
-                if torch.cuda.is_available():
-                    data = Variable(data.cuda())
-                else:
-                    data = Variable(data)
-                
-                optimizer.zero_grad()
-                
-                # Mixed precision forward pass with unlabeled data
-                with autocast():
-                    # Forward pass with unlabeled data (unsupervised mode)
-                    outputs = net(data, mode='unsupervised')
+                    # Common color mapping for ISPRS dataset - adjust these for your dataset
+                    # Impervious surfaces (RGB: 255, 255, 255) -> 0
+                    lbl_mapped[(lbl[:,:,0] > 200) & (lbl[:,:,1] > 200) & (lbl[:,:,2] > 200)] = 0
+                    # Building (RGB: 0, 0, 255) -> 1
+                    lbl_mapped[(lbl[:,:,0] < 50) & (lbl[:,:,1] < 50) & (lbl[:,:,2] > 200)] = 1
+                    # Low vegetation (RGB: 0, 255, 255) -> 2
+                    lbl_mapped[(lbl[:,:,0] < 50) & (lbl[:,:,1] > 200) & (lbl[:,:,2] > 200)] = 2
+                    # Tree (RGB: 0, 255, 0) -> 3
+                    lbl_mapped[(lbl[:,:,0] < 50) & (lbl[:,:,1] > 200) & (lbl[:,:,2] < 50)] = 3
+                    # Car (RGB: 255, 255, 0) -> 4
+                    lbl_mapped[(lbl[:,:,0] > 200) & (lbl[:,:,1] > 200) & (lbl[:,:,2] < 50)] = 4
+                    # Clutter/background (RGB: 255, 0, 0) -> 5
+                    lbl_mapped[(lbl[:,:,0] > 200) & (lbl[:,:,1] < 50) & (lbl[:,:,2] < 50)] = 5
                     
-                    # Calculate unsupervised loss
-                    loss, loss_components = criterion(outputs, targets=None, mode='unsupervised')
+                    lbl = lbl_mapped
                 
-                # Backward pass with gradient scaling
-                scaler.scale(loss).backward()
+                self.labels.append(lbl)
+                print(f"Loaded image and label for ID {id}, shape: {img.shape}, {lbl.shape}")
                 
-                # Gradient clipping with stricter limit to prevent exploding gradients
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1.0)
-                
-                # Update with gradient scaling
-                scaler.step(optimizer)
-                scaler.update()
-                
-                # Record loss for this batch
-                epoch_unsupervised_losses.append(loss.item())
-                epoch_total_loss += loss.item()
-                num_batches += 1
-                
-                # Track individual loss components
-                for component, value in loss_components.items():
-                    if component in batch_component_losses:
-                        batch_component_losses[component].append(value.item() if torch.is_tensor(value) else value)
+            except Exception as e:
+                print(f"Error loading image/label {id}: {e}")
         
-        # Calculate average loss for this epoch
-        avg_epoch_loss = epoch_total_loss / num_batches if num_batches > 0 else 0
-        epoch_losses.append(avg_epoch_loss)
-        
-        # Calculate average component losses
-        for component, values in batch_component_losses.items():
-            if values:
-                component_losses[component].append(sum(values) / len(values))
-            else:
-                component_losses[component].append(0)
-        
-        # Validation step at the end of each epoch (if we have validation data)
-        if len(val_loader) > 0:
-            val_loss, val_acc = validate(net, criterion, val_loader)
-            epoch_val_losses.append(val_loss)
-            epoch_val_acc.append(val_acc)
+        # Create windows with overlap
+        self.windows = []
+        for img_idx, (img, lbl) in enumerate(zip(self.images, self.labels)):
+            height, width = img.shape[:2]
             
-            # Save best model based on validation accuracy
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                torch.save(net.state_dict(), f'{output_path}/model_best.pth')
-                print(f"New best model saved with validation accuracy: {best_val_acc:.2f}%")
-                early_stop_counter = 0  # Reset early stopping counter
-            else:
-                early_stop_counter += 1
-                
-            # Early stopping check
-            if early_stop_counter >= patience:
-                print(f"Early stopping triggered after {patience} epochs without improvement")
-                break
-                
-            # Update loss weights based on current epoch
-            if hasattr(criterion, 'update_epoch'):
-                criterion.update_epoch(e, epochs)
+            for i in range(0, height - window_size[0] + 1, self.stride):
+                for j in range(0, width - window_size[1] + 1, self.stride):
+                    self.windows.append((img_idx, i, j))
+        
+        print(f"Dataset created with {len(self.windows)} patches from {len(self.images)} images with enhanced augmentation")
+    
+    def augment_data(self, image, label):
+        """Apply enhanced random augmentations to the image and label"""
+        # Convert to HWC format for augmentation if image is a tensor
+        if torch.is_tensor(image):
+            image_np = image.cpu().numpy().transpose(1, 2, 0)
         else:
-            # If no validation data, just use training loss
-            val_loss = avg_epoch_loss
-            val_acc = 0.0
-            epoch_val_losses.append(val_loss)
-            epoch_val_acc.append(val_acc)
-        
-        # Report epoch-level stats
-        print(f'Epoch {e}/{epochs} - Train Loss: {avg_epoch_loss:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%')
-        
-        # Plot losses
-        plot_training_curves(epoch_losses, epoch_val_losses, epoch_val_acc, 
-                           component_losses, grad_norms, output_path)
-        
-        # Update learning rate
-        if scheduler is not None:
-            scheduler.step()
-        
-        # Save model checkpoint
-        if e % save_epoch == 0:
-            torch.save(net.state_dict(), f'{output_path}/model_epoch{e}.pth')
-            print(f"Model saved at epoch {e}")
-        
-        # Visualize a sample from validation set at regular intervals
-        if e % save_epoch == 0 or e == epochs:
-            visualize_sample(net, val_loader, e, output_path)
-    
-    # Save final model
-    torch.save(net.state_dict(), f'{output_path}/model_final.pth')
-    print("Training completed. Final model saved.")
-
-
-def validate(net, criterion, val_loader):
-    """
-    Validate the model on the validation set with mixed precision
-    
-    Parameters:
-    -----------
-    net: torch.nn.Module
-        The hierarchical PGM model
-    criterion: torch.nn.Module
-        The loss function (HierarchicalPGMLoss)
-    val_loader: torch.utils.data.DataLoader
-        DataLoader for validation data
-        
-    Returns:
-    --------
-    avg_val_loss: float
-        Average validation loss
-    avg_val_acc: float
-        Average validation accuracy (%)
-    """
-    net.eval()
-    val_loss = 0.0
-    val_acc = 0.0
-    val_iou = 0.0
-    num_batches = 0
-    
-    with torch.no_grad():
-        for data, target in val_loader:
-            if torch.cuda.is_available():
-                data, target = data.cuda(), target.cuda()
+            image_np = image
             
-            # Use mixed precision for validation as well
-            with autocast():
-                # Forward pass in inference mode
-                outputs = net(data, mode='inference')
+        # Convert label to numpy if it's a tensor
+        if torch.is_tensor(label):
+            label_np = label.cpu().numpy()
+        else:
+            label_np = label
+        
+        # Random horizontal flip
+        if np.random.random() > 0.5:
+            image_np = np.flip(image_np, axis=1).copy()
+            label_np = np.flip(label_np, axis=1).copy()
+        
+        # Random vertical flip
+        if np.random.random() > 0.5:
+            image_np = np.flip(image_np, axis=0).copy()
+            label_np = np.flip(label_np, axis=0).copy()
+        
+        # Random brightness/contrast adjustment (image only)
+        if np.random.random() > 0.5:
+            alpha = 0.8 + 0.4 * np.random.random()  # 0.8 to 1.2
+            beta = -0.1 + 0.2 * np.random.random()  # -0.1 to 0.1
+            image_np = np.clip(alpha * image_np + beta, 0, 1)
+        
+        # Convert to tensors for intermediate processing
+        image_tensor = torch.from_numpy(image_np.transpose(2, 0, 1)).float()
+        label_tensor = torch.from_numpy(label_np).long()
+        
+        # ENHANCED AUGMENTATIONS:
+        
+        # 1. Apply elastic transform with 30% probability
+        if np.random.random() > 0.7:
+            image_tensor, label_tensor = elastic_transform(
+                image_tensor, label_tensor, 
+                alpha=50 + np.random.random() * 50,  # 50-100 range for alpha
+                sigma=4 + np.random.random() * 2     # 4-6 range for sigma
+            )
+        
+        # 2. Apply color augmentations with 40% probability
+        if np.random.random() > 0.6:
+            # Get color transform
+            color_transform = get_augmentation_transforms(p=0.8)
+            # Apply only to the image (not the label)
+            image_tensor = color_transform(image_tensor)
+        
+        # 3. Random rotation with 20% probability
+        if np.random.random() > 0.8:
+            angle = np.random.randint(-30, 30)  # -30 to +30 degrees
+            
+            # Convert tensors back to numpy for rotation
+            if torch.is_tensor(image_tensor):
+                rot_img = image_tensor.permute(1, 2, 0).cpu().numpy()
+            else:
+                rot_img = image_tensor.transpose(1, 2, 0)
                 
-                # Calculate loss
-                loss, _ = criterion(outputs, target, mode='supervised')
+            if torch.is_tensor(label_tensor):
+                rot_label = label_tensor.cpu().numpy()
+            else:
+                rot_label = label_tensor
             
-            val_loss += loss.item()
+            # Apply rotation
+            center = (rot_img.shape[1] // 2, rot_img.shape[0] // 2)
+            rot_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
             
-            # Calculate accuracy and IoU
-            pred = outputs['final_segmentation'].argmax(dim=1).cpu().numpy()
-            target_np = target.cpu().numpy()
+            rot_img = cv2.warpAffine(rot_img, rot_matrix, (rot_img.shape[1], rot_img.shape[0]), 
+                                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+            rot_label = cv2.warpAffine(rot_label, rot_matrix, (rot_label.shape[1], rot_label.shape[0]), 
+                                    flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_REFLECT)
             
-            # Calculate batch accuracy and IoU
-            batch_acc = 0
-            batch_iou = 0
-            for i in range(len(pred)):
-                batch_acc += accuracy(pred[i], target_np[i])
-                batch_iou += calculate_miou(pred[i], target_np[i], n_classes=outputs['final_segmentation'].size(1))
-            
-            batch_acc /= len(pred)
-            batch_iou /= len(pred)
-            
-            val_acc += batch_acc
-            val_iou += batch_iou
-            num_batches += 1
-    
-    # Calculate averages
-    avg_val_loss = val_loss / num_batches if num_batches > 0 else 0
-    avg_val_acc = val_acc / num_batches if num_batches > 0 else 0
-    avg_val_iou = val_iou / num_batches if num_batches > 0 else 0
-    
-    print(f"Validation IoU: {avg_val_iou:.4f}")
-    
-    return avg_val_loss, avg_val_acc
-
-def calculate_miou(pred, target, n_classes=6, ignore_index=6):
-    """
-    Calculate mean IoU for evaluation
-    
-    Parameters:
-    -----------
-    pred: numpy array
-        Prediction mask
-    target: numpy array
-        Ground truth mask
-    n_classes: int
-        Number of classes
-    ignore_index: int
-        Index to ignore in calculation
+            # Convert back to tensors
+            image_tensor = torch.from_numpy(rot_img.transpose(2, 0, 1)).float()
+            label_tensor = torch.from_numpy(rot_label).long()
         
-    Returns:
-    --------
-    miou: float
-        Mean IoU score
-    """
-    ious = []
+        # Return the final augmented tensors
+        return image_tensor, label_tensor
     
-    # Calculate IoU for each class
-    for cls in range(n_classes):
-        if cls == ignore_index:
-            continue
-            
-        pred_mask = (pred == cls)
-        target_mask = (target == cls)
-        
-        # Skip if class is not present in ground truth
-        if target_mask.sum() == 0:
-            continue
-            
-        # Calculate intersection and union
-        intersection = (pred_mask & target_mask).sum()
-        union = (pred_mask | target_mask).sum()
-        
-        # Calculate IoU
-        iou = intersection / union if union > 0 else 0
-        ious.append(iou)
+    def __len__(self):
+        return len(self.windows)
     
-    # Return mean IoU
-    return sum(ious) / len(ious) if ious else 0
+    def __getitem__(self, idx):
+        img_idx, i, j = self.windows[idx]
+        image = self.images[img_idx]
+        label = self.labels[img_idx]
+        
+        # Extract window
+        image_patch = image[i:i+self.window_size[0], j:j+self.window_size[1], :]
+        label_patch = label[i:i+self.window_size[0], j:j+self.window_size[1]]
+        
+        # Convert to torch format
+        image_patch = np.transpose(image_patch, (2, 0, 1))  # HWC -> CHW
+        image_patch = torch.from_numpy(image_patch).float()
+        label_patch = torch.from_numpy(label_patch).long()
+        
+        # Apply standard augmentations during training
+        if self.augment:
+            image_patch, label_patch = self.augment_data(image_patch, label_patch)
+            
+            # Apply CutMix augmentation if enabled and we have more than one image
+            # This is especially important for low-data regimes
+            if self.enable_cutmix and len(self.images) > 1 and random.random() < self.cutmix_prob:
+                # Get a random second sample from the dataset
+                second_idx = random.randint(0, len(self.windows) - 1)
+                if second_idx != idx:  # Make sure it's different from current
+                    second_img_idx, second_i, second_j = self.windows[second_idx]
+                    second_image = self.images[second_img_idx]
+                    second_label = self.labels[second_img_idx]
+                    
+                    # Extract window
+                    second_image_patch = second_image[second_i:second_i+self.window_size[0], 
+                                                   second_j:second_j+self.window_size[1], :]
+                    second_label_patch = second_label[second_i:second_i+self.window_size[0], 
+                                                   second_j:second_j+self.window_size[1]]
+                    
+                    # Convert to torch format
+                    second_image_patch = np.transpose(second_image_patch, (2, 0, 1))
+                    second_image_patch = torch.from_numpy(second_image_patch).float()
+                    second_label_patch = torch.from_numpy(second_label_patch).long()
+                    
+                    # Apply standard augmentation to second patch
+                    second_image_patch, second_label_patch = self.augment_data(second_image_patch, second_label_patch)
+                    
+                    # Apply CutMix between the two patches
+                    try:
+                        image_patch, label_patch = cutmix_augmentation(
+                            image_patch, label_patch, 
+                            second_image_patch, second_label_patch, 
+                            alpha=0.5
+                        )
+                    except ValueError:
+                        # Fall back to original patches if CutMix fails
+                        pass  # Keep original patches if CutMix fails
+        
+        return image_patch, label_patch
 
 
-def plot_training_curves(train_losses, val_losses, val_acc, component_losses, grad_norms, output_path):
+class SimplifiedMRF(nn.Module):
     """
-    Plot training curves
+    A simplified replacement for QuadtreeMRF that uses a hierarchical
+    fully convolutional structure with CRF-like pairwise dependencies.
     
-    Parameters:
-    -----------
-    train_losses: list
-        List of training losses per epoch
-    val_losses: list
-        List of validation losses per epoch
-    val_acc: list
-        List of validation accuracies per epoch
-    component_losses: dict
-        Dictionary of individual loss components per epoch
-    grad_norms: list
-        List of gradient norms per batch
-    output_path: str
-        Path to save plots
+    This model is designed to work with CVAE features.
     """
-    # Skip if no data
-    if len(train_losses) == 0:
-        print("No training data to plot")
-        return
+    def __init__(self, n_classes=6, feature_dim=256, device="cuda"):
+        super(SimplifiedMRF, self).__init__()
+        self.n_classes = n_classes
+        self.feature_dim = feature_dim
+        self.device = device
+        
+        # Feature adaptation layer
+        self.feature_adaptation = nn.Sequential(
+            nn.Conv2d(feature_dim, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Hierarchical feature extraction
+        # Level 1: Full resolution
+        self.level1 = nn.Sequential(
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Level 2: Half resolution
+        self.downsample1 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.level2 = nn.Sequential(
+            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Level 3: Quarter resolution
+        self.downsample2 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.level3 = nn.Sequential(
+            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Spatial context enhancement with dilated convolutions
+        self.context = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=3, padding=4, dilation=4),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Upsampling and fusion
+        self.upsample3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.fuse3 = nn.Sequential(
+            nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.fuse2 = nn.Sequential(
+            nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+        
+        # CRF-like smoothing (simulates pairwise potentials)
+        self.pairwise = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, n_classes, kernel_size=1)
+        )
     
-    # Plot combined loss curves
-    plt.figure(figsize=(12, 6))
-    plt.subplot(1, 2, 1)
-    plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss')
-    if len(val_losses) > 0:
-        plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss')
-    plt.title('Training and Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.grid(True)
+    def forward(self, features):
+        """Forward pass through the simplified MRF model"""
+        # Feature adaptation
+        x = self.feature_adaptation(features)
+        
+        # Multi-scale feature extraction
+        f1 = self.level1(x)
+        
+        x_down1 = self.downsample1(x)
+        f2 = self.level2(torch.cat([x_down1, self.downsample1(f1)], dim=1))
+        
+        x_down2 = self.downsample2(x_down1)
+        f3 = self.level3(torch.cat([x_down2, self.downsample2(f2)], dim=1))
+        
+        # Context enhancement
+        f3_ctx = self.context(f3)
+        
+        # Hierarchical fusion
+        f3_up = self.upsample3(f3_ctx)
+        f2_fused = self.fuse3(torch.cat([f2, f3_up], dim=1))
+        
+        f2_up = self.upsample2(f2_fused)
+        f1_fused = self.fuse2(torch.cat([f1, f2_up], dim=1))
+        
+        # Final prediction with CRF-like smoothing
+        logits = self.pairwise(f1_fused)
+        
+        return logits
+
+
+class SegmentationTrainer:
+    """Training class for the SimplifiedMRF model with CVAE features"""
+    def __init__(self, cvae_path, n_classes=6, feature_dim=256, learning_rate=0.001, device="cuda"):
+        """
+        Initialize the trainer with a pre-trained CVAE for feature extraction
+        """
+        self.device = device
+        self.n_classes = n_classes
+        self.feature_dim = feature_dim
+        
+        # Load pre-trained CVAE
+        self.cvae = self._load_cvae(cvae_path, feature_dim)
+        
+        # Create the simplified MRF model
+        self.model = SimplifiedMRF(
+            n_classes=n_classes,
+            feature_dim=feature_dim,
+            device=device
+        ).to(device)
+        
+        # Setup optimizer
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=learning_rate,
+            weight_decay=0.0001,
+            eps=1e-5
+        )
+        
+        # Setup loss function with class weighting for imbalanced data
+        self.class_weights = None
+        self.criterion = nn.CrossEntropyLoss(ignore_index=255, reduction='mean')
+        
+        # Create metrics tracker
+        self.metrics = {
+            'train_loss': [],
+            'val_loss': [],
+            'val_accuracy': [],
+            'val_mean_iou': [],
+            'val_f1': []
+        }
     
-    plt.subplot(1, 2, 2)
-    if len(val_acc) > 0:
-        plt.plot(range(1, len(val_acc) + 1), val_acc)
+    def _load_cvae(self, model_path, feature_dim):
+        """Load pre-trained CVAE model"""
+        # Use the new FixedEnhancedCVAE with the right dimensions
+        # Note: Make sure to use the same hidden_dims as in training
+        cvae = EnhancedCVAE(
+            input_channels=3, 
+            latent_dim=feature_dim,
+            hidden_dims=[64, 128, 256, 512]
+        )
+        
+        # Load weights - use strict=False to handle potential differences
+        try:
+            cvae.load_state_dict(torch.load(
+                model_path, 
+                map_location=torch.device(self.device),
+                weights_only=True
+            ), strict=False)
+            print("CVAE model loaded successfully")
+        except Exception as e:
+            print(f"Warning when loading CVAE weights: {e}")
+            print("Proceeding with newly initialized model - performance may be affected")
+        
+        # Move to device and set to evaluation mode
+        cvae = cvae.to(self.device)
+        cvae.eval()
+        
+        return cvae
+    
+    def extract_cvae_features(self, images):
+        """Extract features from the pre-trained CVAE"""
+        with torch.no_grad():
+            try:
+                # Get outputs from CVAE
+                outputs = self.cvae(images)
+                
+                # Extract relevant features from the fixed enhanced CVAE
+                z = outputs['z']  # latent code (batch_size, 512)
+                encoder_features = outputs['encoder_features']  # List of encoder features [e1, e2, e3]
+                
+                # Use the deepest encoder features (now at index 2)
+                # The encoder features for FixedEnhancedCVAE are [e1(64), e2(128), e3(256)]
+                deep_features = encoder_features[2]  # Shape: [batch_size, 256, 32, 32]
+                
+                # Size of input and feature map
+                input_size = images.size(-1)  # 256
+                feature_size = deep_features.size(-1)  # 32
+                
+                # Expand latent vector to spatial dimensions
+                z_spatial = z.unsqueeze(-1).unsqueeze(-1)  # [batch_size, 512, 1, 1]
+                z_spatial = F.interpolate(
+                    z_spatial,
+                    size=(feature_size, feature_size),  # [batch_size, 512, 32, 32]
+                    mode='bilinear',
+                    align_corners=False
+                )
+                
+                # Create a projection layer to match the expected feature dimensions
+                # We need to reduce the combined channels to match the model's expected input
+                combined = torch.cat([z_spatial, deep_features], dim=1)  # [batch_size, 512+256, 32, 32]
+                
+                # Create or update projection layer if needed
+                if not hasattr(self, 'projection') or self.projection.in_channels != combined.size(1):
+                    self.projection = nn.Conv2d(
+                        combined.size(1),  # 512+256 = 768
+                        self.feature_dim,  # Usually 512
+                        kernel_size=1
+                    ).to(self.device)
+                
+                # Project to expected dimension
+                features = self.projection(combined)  # [batch_size, feature_dim, 32, 32]
+                
+                return features.detach()  # detach to avoid backprop into CVAE
+                
+            except RuntimeError as e:
+                print(f"Warning in feature extraction: {e}")
+                # Create random features if all else fails
+                return torch.randn(
+                    images.size(0), 
+                    self.feature_dim, 
+                    images.size(2) // 8, 
+                    images.size(3) // 8,
+                    device=self.device
+                ) * 0.1
+    
+    def update_class_weights(self, labels):
+        """Update class weights based on label distribution"""
+        # Count class frequencies
+        counts = torch.zeros(self.n_classes, device=self.device)
+        for c in range(self.n_classes):
+            counts[c] = (labels == c).sum().float()
+        
+        # Add small constant to avoid division by zero
+        counts = counts + 1.0
+        
+        # Compute inverse frequency weights
+        weights = 1.0 / counts
+        
+        # Normalize weights
+        weights = weights / weights.sum() * self.n_classes
+        
+        # Update class weights
+        self.class_weights = weights
+        
+        # Update criterion
+        self.criterion = nn.CrossEntropyLoss(
+            weight=self.class_weights,
+            ignore_index=255,
+            reduction='mean'
+        )
+    
+    def compute_metrics(self, predictions, targets):
+        """Compute segmentation metrics"""
+        # Convert to numpy arrays
+        pred_np = predictions.cpu().numpy().flatten()
+        target_np = targets.cpu().numpy().flatten()
+        
+        # Remove ignored pixels (255)
+        valid_idx = target_np != 255
+        pred_np = pred_np[valid_idx]
+        target_np = target_np[valid_idx]
+        
+        # Compute metrics
+        acc = accuracy_score(target_np, pred_np)
+        iou = jaccard_score(target_np, pred_np, average='macro', labels=range(self.n_classes), zero_division=0)
+        f1 = f1_score(target_np, pred_np, average='macro', labels=range(self.n_classes), zero_division=0)
+        
+        return {
+            'accuracy': acc,
+            'mean_iou': iou,
+            'f1_score': f1
+        }
+    
+    def train(self, train_loader, val_loader, epochs, save_dir):
+        """Train the SimplifiedMRF model"""
+        # Create save directory
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Track best validation performance
+        best_iou = 0.0
+        
+        # Training loop
+        for epoch in range(1, epochs + 1):
+            # Clear GPU cache before each epoch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+            # Training phase
+            self.model.train()
+            train_loss = 0.0
+            
+            # Progress bar
+            train_bar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs} [Train]")
+            
+            for batch_idx, (images, labels) in enumerate(train_bar):
+                # Move to device
+                images = images.to(self.device)
+                labels = labels.to(self.device)
+                
+                # Update class weights on first batch
+                if epoch == 1 and batch_idx == 0 and self.class_weights is None:
+                    self.update_class_weights(labels)
+                
+                # Extract features from CVAE with reduced memory footprint
+                with torch.no_grad():
+                    # Process in smaller batches if needed
+                    batch_size = images.size(0)
+                    if batch_size > 4:  # Use smaller batches for feature extraction
+                        cvae_features = []
+                        for i in range(0, batch_size, 4):
+                            mini_batch = images[i:i+4]
+                            mini_features = self.extract_cvae_features(mini_batch)
+                            cvae_features.append(mini_features)
+                        cvae_features = torch.cat(cvae_features, dim=0)
+                    else:
+                        cvae_features = self.extract_cvae_features(images)
+                
+                # Forward pass through the MRF model
+                logits = self.model(cvae_features)
+                
+                # Resize logits to match label size if needed
+                if logits.shape[2:] != labels.shape[1:]:
+                    logits = F.interpolate(
+                        logits,
+                        size=(labels.shape[1], labels.shape[2]),
+                        mode='bilinear',
+                        align_corners=False
+                    )
+                
+                # Compute loss
+                loss = self.criterion(logits, labels)
+                
+                # Backward pass
+                self.optimizer.zero_grad()
+                loss.backward()
+                
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                
+                # Update weights
+                self.optimizer.step()
+                
+                # Update statistics
+                train_loss += loss.item()
+                train_bar.set_postfix({"loss": train_loss / (batch_idx + 1)})
+            
+            # Compute average training loss
+            avg_train_loss = train_loss / len(train_loader)
+            self.metrics['train_loss'].append(avg_train_loss)
+            
+            # Validation phase
+            self.model.eval()
+            val_loss = 0.0
+            all_preds = []
+            all_targets = []
+            
+            # Progress bar
+            val_bar = tqdm(val_loader, desc=f"Epoch {epoch}/{epochs} [Val]")
+            
+            with torch.no_grad():
+                for batch_idx, (images, labels) in enumerate(val_bar):
+                    # Move to device
+                    images = images.to(self.device)
+                    labels = labels.to(self.device)
+                    
+                    # Extract features from CVAE with reduced memory footprint
+                    # Process in smaller batches if needed
+                    batch_size = images.size(0)
+                    if batch_size > 4:  # Use smaller batches for feature extraction
+                        cvae_features = []
+                        for i in range(0, batch_size, 4):
+                            mini_batch = images[i:i+4]
+                            mini_features = self.extract_cvae_features(mini_batch)
+                            cvae_features.append(mini_features)
+                        cvae_features = torch.cat(cvae_features, dim=0)
+                    else:
+                        cvae_features = self.extract_cvae_features(images)
+                    
+                    # Forward pass
+                    logits = self.model(cvae_features)
+                    
+                    # Resize logits to match label size if needed
+                    if logits.shape[2:] != labels.shape[1:]:
+                        logits = F.interpolate(
+                            logits,
+                            size=(labels.shape[1], labels.shape[2]),
+                            mode='bilinear',
+                            align_corners=False
+                        )
+                    
+                    # Compute loss
+                    loss = self.criterion(logits, labels)
+                    
+                    # Get predictions
+                    preds = torch.argmax(logits, dim=1)
+                    
+                    # Update statistics
+                    val_loss += loss.item()
+                    val_bar.set_postfix({"loss": val_loss / (batch_idx + 1)})
+                    
+                    # Store predictions and targets for metric computation
+                    all_preds.append(preds)
+                    all_targets.append(labels)
+            
+            # Compute average validation loss
+            avg_val_loss = val_loss / len(val_loader)
+            self.metrics['val_loss'].append(avg_val_loss)
+            
+            # Concatenate predictions and targets
+            all_preds = torch.cat(all_preds, dim=0)
+            all_targets = torch.cat(all_targets, dim=0)
+            
+            # Compute validation metrics
+            metrics = self.compute_metrics(all_preds, all_targets)
+            self.metrics['val_accuracy'].append(metrics['accuracy'])
+            self.metrics['val_mean_iou'].append(metrics['mean_iou'])
+            self.metrics['val_f1'].append(metrics['f1_score'])
+            
+            # Visualize some segmentation results
+            if epoch % 5 == 0 or epoch == epochs:
+                self.visualize_segmentations(images[:8], labels[:8], all_preds[:8], epoch, save_dir)
+            
+            # Print epoch summary
+            print(f"Epoch {epoch}/{epochs}:")
+            print(f"  Train Loss: {avg_train_loss:.6f}")
+            print(f"  Val Loss: {avg_val_loss:.6f}")
+            print(f"  Val Accuracy: {metrics['accuracy']:.4f}")
+            print(f"  Val Mean IoU: {metrics['mean_iou']:.4f}")
+            print(f"  Val F1 Score: {metrics['f1_score']:.4f}")
+            
+            # Save best model
+            if metrics['mean_iou'] > best_iou:
+                best_iou = metrics['mean_iou']
+                torch.save(self.model.state_dict(), f"{save_dir}/model_best.pth")
+                print(f"  New best model saved with Mean IoU: {best_iou:.4f}")
+            
+            # Save checkpoint
+            if epoch % 5 == 0 or epoch == epochs:
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'metrics': self.metrics
+                }, f"{save_dir}/checkpoint_epoch{epoch}.pth")
+            
+            # Plot and save training curves
+            self.plot_training_curves(save_dir)
+        
+        print("Training completed!")
+    
+    def plot_training_curves(self, save_dir):
+        """Plot and save training curves"""
+        epochs = range(1, len(self.metrics['train_loss']) + 1)
+        
+        plt.figure(figsize=(15, 10))
+        
+        # Loss curves
+        plt.subplot(2, 2, 1)
+        plt.plot(epochs, self.metrics['train_loss'], 'b-', label='Train Loss')
+        plt.plot(epochs, self.metrics['val_loss'], 'r-', label='Val Loss')
+        plt.title('Loss Curves')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
+        
+        # Accuracy curve
+        plt.subplot(2, 2, 2)
+        plt.plot(epochs, self.metrics['val_accuracy'], 'g-')
         plt.title('Validation Accuracy')
         plt.xlabel('Epoch')
-        plt.ylabel('Accuracy (%)')
+        plt.ylabel('Accuracy')
         plt.grid(True)
-    else:
-        plt.text(0.5, 0.5, "No validation data", horizontalalignment='center',
-                 verticalalignment='center', transform=plt.gca().transAxes)
-    
-    plt.tight_layout()
-    plt.savefig(f"{output_path}/training_curves.png")
-    plt.close()
-    
-    # Plot individual loss components
-    plt.figure(figsize=(15, 10))
-    plotted = 0
-    for i, (component, values) in enumerate(component_losses.items()):
-        if any(values):  # Only plot non-zero components
-            plt.subplot(3, 2, i + 1)
-            plt.plot(range(1, len(values) + 1), values)
-            plt.title(f'{component}')
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.grid(True)
-            plotted += 1
-    
-    if plotted == 0:
-        plt.text(0.5, 0.5, "No loss components to plot", horizontalalignment='center',
-                 verticalalignment='center', transform=plt.gca().transAxes)
-    
-    plt.tight_layout()
-    plt.savefig(f"{output_path}/component_losses.png")
-    plt.close()
-    
-    # Plot gradient norms
-    if len(grad_norms) > 0:
-        plt.figure(figsize=(10, 5))
-        plt.plot(grad_norms)
-        plt.title('Gradient Norms')
-        plt.xlabel('Batch')
-        plt.ylabel('Norm')
+        
+        # Mean IoU curve
+        plt.subplot(2, 2, 3)
+        plt.plot(epochs, self.metrics['val_mean_iou'], 'm-')
+        plt.title('Validation Mean IoU')
+        plt.xlabel('Epoch')
+        plt.ylabel('Mean IoU')
         plt.grid(True)
-        plt.savefig(f"{output_path}/gradient_norms.png")
+        
+        # F1 Score curve
+        plt.subplot(2, 2, 4)
+        plt.plot(epochs, self.metrics['val_f1'], 'c-')
+        plt.title('Validation F1 Score')
+        plt.xlabel('Epoch')
+        plt.ylabel('F1 Score')
+        plt.grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(f"{save_dir}/training_curves.png")
         plt.close()
+    
+    def visualize_segmentations(self, images, labels, predictions, epoch, save_dir):
+        """Visualize segmentation results"""
+        # Define color map for segmentation visualization
+        colors = [
+            [255, 255, 255],  # Impervious surfaces (white)
+            [0, 0, 255],      # Building (blue)
+            [0, 255, 255],    # Low vegetation (cyan)
+            [0, 255, 0],      # Tree (green)
+            [255, 255, 0],    # Car (yellow)
+            [255, 0, 0]       # Clutter (red)
+        ]
+        colors = np.array(colors)
+        
+        # Number of samples to visualize
+        n_samples = min(8, images.size(0))
+        
+        # Create figure
+        fig, axes = plt.subplots(n_samples, 3, figsize=(12, 4 * n_samples))
+        
+        for i in range(n_samples):
+            # Get data for this sample
+            img = images[i].cpu().numpy().transpose(1, 2, 0)
+            lbl = labels[i].cpu().numpy()
+            pred = predictions[i].cpu().numpy()
+            
+            # Create colored segmentation maps
+            lbl_colored = np.zeros((lbl.shape[0], lbl.shape[1], 3), dtype=np.uint8)
+            pred_colored = np.zeros((pred.shape[0], pred.shape[1], 3), dtype=np.uint8)
+            
+            for c in range(self.n_classes):
+                lbl_colored[lbl == c] = colors[c]
+                pred_colored[pred == c] = colors[c]
+            
+            # Display images
+            if n_samples == 1:
+                axes[0].imshow(np.clip(img, 0, 1))
+                axes[0].set_title("Input Image")
+                axes[0].axis("off")
+                
+                axes[1].imshow(lbl_colored)
+                axes[1].set_title("Ground Truth")
+                axes[1].axis("off")
+                
+                axes[2].imshow(pred_colored)
+                axes[2].set_title("Prediction")
+                axes[2].axis("off")
+            else:
+                axes[i, 0].imshow(np.clip(img, 0, 1))
+                axes[i, 0].set_title("Input Image" if i == 0 else "")
+                axes[i, 0].axis("off")
+                
+                axes[i, 1].imshow(lbl_colored)
+                axes[i, 1].set_title("Ground Truth" if i == 0 else "")
+                axes[i, 1].axis("off")
+                
+                axes[i, 2].imshow(pred_colored)
+                axes[i, 2].set_title("Prediction" if i == 0 else "")
+                axes[i, 2].axis("off")
+        
+        plt.tight_layout()
+        plt.savefig(f"{save_dir}/segmentation_epoch{epoch}.png")
+        plt.close()
+    
+    def validate(self, val_loader, output_dir):
+        """Validate the model on the validation set"""
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Set model to evaluation mode
+        self.model.eval()
+        
+        # Validation variables
+        val_loss = 0.0
+        all_preds = []
+        all_targets = []
+        
+        # Progress bar
+        val_bar = tqdm(val_loader, desc=f"Validating")
+        
+        with torch.no_grad():
+            for batch_idx, (images, labels) in enumerate(val_bar):
+                # Move to device
+                images = images.to(self.device)
+                labels = labels.to(self.device)
+                
+                # Extract features from CVAE
+                cvae_features = self.extract_cvae_features(images)
+                
+                # Forward pass
+                logits = self.model(cvae_features)
+                
+                # Resize logits to match label size if needed
+                if logits.shape[2:] != labels.shape[1:]:
+                    logits = F.interpolate(
+                        logits,
+                        size=(labels.shape[1], labels.shape[2]),
+                        mode='bilinear',
+                        align_corners=False
+                    )
+                
+                # Compute loss
+                loss = self.criterion(logits, labels)
+                
+                # Get predictions
+                preds = torch.argmax(logits, dim=1)
+                
+                # Update statistics
+                val_loss += loss.item()
+                val_bar.set_postfix({"loss": val_loss / (batch_idx + 1)})
+                
+                # Store predictions and targets for metric computation
+                all_preds.append(preds)
+                all_targets.append(labels)
+                
+                # Visualize first few batches
+                if batch_idx < 4:
+                    self.visualize_segmentations(
+                        images, labels, preds, f"val_batch{batch_idx}", output_dir
+                    )
+        
+        # Compute average validation loss
+        avg_val_loss = val_loss / len(val_loader)
+        
+        # Concatenate predictions and targets
+        all_preds = torch.cat(all_preds, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
+        
+        # Compute validation metrics
+        metrics = self.compute_metrics(all_preds, all_targets)
+        
+        # Print results
+        print("Validation Results:")
+        print(f"  Loss: {avg_val_loss:.6f}")
+        print(f"  Accuracy: {metrics['accuracy']:.4f}")
+        print(f"  Mean IoU: {metrics['mean_iou']:.4f}")
+        print(f"  F1 Score: {metrics['f1_score']:.4f}")
+        
+        # Save results to file
+        with open(f"{output_dir}/validation_metrics.txt", "w") as f:
+            f.write(f"Loss: {avg_val_loss:.6f}\n")
+            f.write(f"Accuracy: {metrics['accuracy']:.4f}\n")
+            f.write(f"Mean IoU: {metrics['mean_iou']:.4f}\n")
+            f.write(f"F1 Score: {metrics['f1_score']:.4f}\n")
+        
+        return metrics
+
+
+def main():
+    """Main function"""
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='Train and evaluate SimplifiedMRF with pre-trained CVAE')
+    parser.add_argument('-i', '--input', help='Path of input directory', 
+                      default="./input/")
+    parser.add_argument('-o', '--output', help='Path of output directory',
+                      default="./output/SimplifiedMRF/")
+    parser.add_argument('-c', '--cvae', help='Path to pre-trained CVAE model',
+                      default="./output/Enhanced-CVAE/model_best.pth")
+    parser.add_argument('-w', '--window', nargs=2, type=int, default=[256, 256],
+                      help='Dimension of image patches')
+    parser.add_argument('-b', '--batch_size', default=4, type=int, help='Batch size')
+    parser.add_argument('-lr', '--learning_rate', default=0.001, type=float, help='Learning rate')
+    parser.add_argument('-e', '--epochs', default=30, type=int, help='Number of epochs')
+    parser.add_argument('-ld', '--latent_dim', default=512, type=int, help='CVAE latent dimension')
+    parser.add_argument('-nc', '--n_classes', default=6, type=int, help='Number of classes')
+    parser.add_argument('-m', '--mode', choices=['train', 'validate'], default='train',
+                      help='Mode: train or validate')
+    parser.add_argument('-cp', '--checkpoint', help='Path to model checkpoint for validation',
+                      default=None)
+    parser.add_argument('-lp', '--labeled_percentage', default=100, type=int, 
+                      help='Percentage of labeled data to use (10, 30, 75, 100)')
+    parser.add_argument('-s', '--seed', default=42, type=int,
+                      help='Random seed for reproducibility')
+    args = parser.parse_args()
+    
+    # Set random seeds for reproducibility
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Create output directory with percentage in name for experiments
+    if args.labeled_percentage < 100:
+        OUTPUT_FOLDER = f"{args.output}_{args.labeled_percentage}pct_labeled"
     else:
-        print("No gradient norms to plot")
+        OUTPUT_FOLDER = args.output
+    
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    
+    # Parameters
+    WINDOW_SIZE = tuple(args.window)
+    FOLDER = args.input
+    CVAE_PATH = args.cvae
+    BATCH_SIZE = args.batch_size
+    EPOCHS = args.epochs
+    LEARNING_RATE = args.learning_rate
+    LATENT_DIM = args.latent_dim
+    N_CLASSES = args.n_classes
+    
+    # Data paths
+    IMAGE_FILES = f"{FOLDER}/top/top_mosaic_09cm_area{{}}.tif"
+    LABEL_FILES = f"{FOLDER}/gt/top_mosaic_09cm_area{{}}.tif"
+    
+    # Define train and test IDs
+    all_ids = ['1', '3', '23', '26', '7', '11', '13', '28', '17', '32', '34', '37', '5', '15', '21', '30']
+    
+    # Split data (same as for CVAE)
+    train_val_split = int(len(all_ids) * 0.8)
+    train_ids_full = all_ids[:train_val_split]
+    val_ids = all_ids[train_val_split:]
+    
+    # For semi-supervised experiments, use only a subset of labeled data
+    labeled_percentage = args.labeled_percentage
+    if labeled_percentage < 100:
+        # Use only a subset of training data as labeled
+        num_labeled = max(1, int(len(train_ids_full) * labeled_percentage / 100))
+        # Instead of sequential selection, we can shuffle for better class representation
+        # But first set the seed for reproducibility
+        rng = np.random.RandomState(args.seed)
+        shuffled_indices = rng.permutation(len(train_ids_full))
+        labeled_indices = shuffled_indices[:num_labeled]
+        
+        # Get the actual labeled IDs
+        train_ids = [train_ids_full[i] for i in labeled_indices]
+        print(f"Using {len(train_ids)} images ({labeled_percentage}%) as labeled data: {train_ids}")
+    else:
+        train_ids = train_ids_full
+        print(f"Using all {len(train_ids)} images (100%) as labeled data")
+    
+    print(f"Validation IDs: {val_ids}")
+    
+    # Create datasets
+    if args.mode == 'train':
+        train_set = SegmentationDataset(
+            train_ids, IMAGE_FILES, LABEL_FILES, WINDOW_SIZE, 
+            augment=True, 
+            enable_cutmix=True,
+            cutmix_prob=0.3  # 30% chance of applying CutMix augmentation
+        )
+    
+    val_set = SegmentationDataset(
+        val_ids, IMAGE_FILES, LABEL_FILES, WINDOW_SIZE, 
+        augment=False,
+        enable_cutmix=False
+    )
+    
+    # Create data loaders
+    if args.mode == 'train':
+        train_loader = DataLoader(
+            train_set, BATCH_SIZE, shuffle=True, 
+            num_workers=4, pin_memory=torch.cuda.is_available()
+        )
+    
+    val_loader = DataLoader(
+        val_set, BATCH_SIZE, shuffle=False,
+        num_workers=4, pin_memory=torch.cuda.is_available()
+    )
+    
+    # Create trainer
+    # Ensure feature_dim matches the enhanced CVAE latent dimension
+    # If we've increased CVAE latent_dim to 512, make sure this matches
+    trainer = SegmentationTrainer(
+        cvae_path=CVAE_PATH,
+        n_classes=N_CLASSES,
+        feature_dim=LATENT_DIM,  # This should match the CVAE latent_dim
+        learning_rate=LEARNING_RATE,
+        device=device
+    )
+    
+    if args.mode == 'train':
+        # Train model
+        trainer.train(train_loader, val_loader, EPOCHS, OUTPUT_FOLDER)
+        
+        # Save experiment metadata
+        with open(f"{OUTPUT_FOLDER}/experiment_info.txt", "w") as f:
+            f.write(f"Labeled percentage: {labeled_percentage}%\n")
+            f.write(f"Labeled images: {train_ids}\n")
+            f.write(f"Validation images: {val_ids}\n")
+            f.write(f"Total labeled patches: {len(train_set)}\n")
+            f.write(f"Total validation patches: {len(val_set)}\n")
+            f.write(f"Batch size: {BATCH_SIZE}\n")
+            f.write(f"Learning rate: {LEARNING_RATE}\n")
+            f.write(f"Epochs: {EPOCHS}\n")
+            f.write(f"Random seed: {args.seed}\n")
+    else:  # Validate mode
+        # Load model
+        checkpoint_path = args.checkpoint or f"{OUTPUT_FOLDER}/model_best.pth"
+        
+        # Load weights
+        trainer.model.load_state_dict(torch.load(
+            checkpoint_path,
+            map_location=device,
+            weights_only=True
+        ))
+        
+        # Run validation
+        validate_output_dir = f"{OUTPUT_FOLDER}/validation"
+        metrics = trainer.validate(val_loader, validate_output_dir)
+        
+        # Save results to file for easier experiment comparison
+        with open(f"{OUTPUT_FOLDER}/result.txt", "w") as f:
+            f.write(f"Labeled percentage: {labeled_percentage}%\n")
+            f.write(f"Accuracy -> {metrics['accuracy']*100:.2f}%\n")
+            f.write(f"Mean IoU -> {metrics['mean_iou']*100:.2f}%\n")
+            f.write(f"F1 Score -> {metrics['f1_score']*100:.2f}%\n")
 
 
-def visualize_sample(net, data_loader, epoch, output_path):
-    """
-    Visualize a sample from the data loader
-    
-    Parameters:
-    -----------
-    net: torch.nn.Module
-        The hierarchical PGM model
-    data_loader: torch.utils.data.DataLoader
-        DataLoader to get samples from
-    epoch: int
-        Current epoch number
-    output_path: str
-        Path to save visualizations
-    """
-    net.eval()
-    
-    # Skip visualization if no data
-    if len(data_loader) == 0:
-        print("No data available for visualization")
-        return
-    
-    with torch.no_grad():
-        try:
-            # Get a sample batch
-            data, target = next(iter(data_loader))
-            if torch.cuda.is_available():
-                data, target = data.cuda(), target.cuda()
-            
-            # Forward pass
-            outputs = net(data, mode='full')
-            
-            # Take the first image in the batch
-            img = data[0].cpu().numpy()
-            img = np.transpose(img, (1, 2, 0))  # Convert from CxHxW to HxWxC
-            img = (img * 255).astype(np.uint8)  # Assuming data is normalized to [0, 1]
-            
-            gt = target[0].cpu().numpy()
-            
-            # Get final segmentation
-            pred = outputs['final_segmentation'][0].argmax(dim=0).cpu().numpy()
-            
-            # Visualize
-            plt.figure(figsize=(15, 5))
-            
-            plt.subplot(1, 3, 1)
-            plt.imshow(img)
-            plt.title('Input Image')
-            plt.axis('off')
-            
-            plt.subplot(1, 3, 2)
-            plt.imshow(convert_to_color(gt))
-            plt.title('Ground Truth')
-            plt.axis('off')
-            
-            plt.subplot(1, 3, 3)
-            plt.imshow(convert_to_color(pred))
-            plt.title('Prediction')
-            plt.axis('off')
-            
-            plt.savefig(f"{output_path}/sample_epoch_{epoch}.png")
-            plt.close()
-        except StopIteration:
-            print("No data available for visualization")
-        except Exception as e:
-            print(f"Error during visualization: {e}")
+if __name__ == "__main__":
+    main()

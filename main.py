@@ -1,207 +1,66 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Main script for Semi-Supervised Hierarchical PGM with Contrastive Learning
+Simplified main script that works with the cleaned codebase
 """
 
 import torch
 import argparse
 import numpy as np
-import matplotlib.pyplot as plt
-from skimage import io
 import os
-from datetime import datetime
+import sys
+from train import main as run_simplified_main
 
-from net.net import HierarchicalPGM
-from net.loss import HierarchicalPGMLoss
-from dataset.dataset import ISPRS_dataset
-from dataset.unsupervised_dataset import ISPRS_unsupervised_dataset
-from utils.utils_dataset import *
-from utils.utils import *
-from utils.export_result import *
-from train import train
-from test_network import test
-
-
-def main(args):
-    # Parameters
-    WINDOW_SIZE = args.window
-    IN_CHANNELS = 3
-    LATENT_DIM = args.latent_dim
-    MAX_DEPTH = args.max_depth
-    
-    FOLDER = args.input
-    OUTPUT_FOLDER = args.output
-    batch_size = args.batch_size
-    epochs = args.epochs
-    save_epoch = args.save_epoch
-    
-    # Define labels
-    labels = ["roads", "buildings", "low veg.", "trees", "cars", "clutter"]
-    N_CLASSES = len(labels)
-    WEIGHTS = torch.ones(N_CLASSES)
-    CACHE = True
-    
-    # Data paths
-    DATA_FOLDER = f"{FOLDER}/top/top_mosaic_09cm_area{{}}.tif"
-    LABEL_FOLDER = f"{FOLDER}/gt/top_mosaic_09cm_area{{}}.tif"
-    ERODED_FOLDER = f"{FOLDER}/gt_eroded/top_mosaic_09cm_area{{}}_noBoundary.tif"
-    
-    # Initialize the model
-    net = HierarchicalPGM(n_channels=IN_CHANNELS, n_classes=N_CLASSES, 
-                          latent_dim=LATENT_DIM, max_depth=MAX_DEPTH)
-    
-    # Initialize loss function
-    criterion = HierarchicalPGMLoss(N_CLASSES, weights=WEIGHTS, 
-                                    kld_weight=args.kld_weight,
-                                    contrastive_weight=args.contrastive_weight,
-                                    consistency_weight=args.consistency_weight)
-    
-    # Set up optimizer with improved parameters
-    base_lr = args.base_lr
-    weight_decay = 0.0001  # Reduced weight decay
-    
-    # Use AdamW optimizer with decoupled weight decay
-    optimizer = torch.optim.AdamW(net.parameters(), lr=base_lr, weight_decay=weight_decay, 
-                                betas=(0.9, 0.999), eps=1e-8)
-    
-    # Use GPU if available
-    if torch.cuda.is_available():
-        net.cuda()
-        criterion.cuda()
-        WEIGHTS = WEIGHTS.cuda()
-    
-    # Define train, validation, and test data
-    all_train_ids = ['1', '3', '23', '26', '7', '11', '13', '28', '17', '32', '34', '37']
-    test_ids = ['5', '15', '21', '30']
-    
-    # Split training data into train and validation (80/20 split)
-    train_val_split = int(len(all_train_ids) * 0.8)
-    train_ids = all_train_ids[:train_val_split]
-    val_ids = all_train_ids[train_val_split:]
-    
-    print(f"Training IDs: {train_ids}")
-    print(f"Validation IDs: {val_ids}")
-    print(f"Test IDs: {test_ids}")
-    
-    # For semi-supervised learning, we use a portion of labeled data
-    labeled_percentage = args.labeled_percentage
-    if labeled_percentage < 100:
-        # Use only a subset of training data as labeled
-        num_labeled = max(1, int(len(train_ids) * labeled_percentage / 100))  # Ensure at least 1 labeled sample
-        labeled_ids = train_ids[:num_labeled]
-        unlabeled_ids = train_ids[num_labeled:]
-        print(f"Using {len(labeled_ids)} tiles as labeled data: {labeled_ids}")
-        print(f"Using {len(unlabeled_ids)} tiles as unlabeled data: {unlabeled_ids}")
-    else:
-        labeled_ids = train_ids
-        unlabeled_ids = []
-        print(f"Using all {len(labeled_ids)} tiles as labeled data")
-    
-    # Create datasets
-    labeled_set = ISPRS_dataset(labeled_ids, ids_type='TRAIN', gt_type=args.gt_type,
-                                gt_modification=disk(args.ero_disk),
-                                data_files=DATA_FOLDER, label_files=LABEL_FOLDER,
-                                window_size=WINDOW_SIZE, cache=CACHE)
-    
-    # Create validation dataset
-    val_set = ISPRS_dataset(val_ids, ids_type='VAL', gt_type=args.gt_type,
-                           gt_modification=disk(args.ero_disk),
-                           data_files=DATA_FOLDER, label_files=LABEL_FOLDER,
-                           window_size=WINDOW_SIZE, cache=CACHE)
-    
-    test_set = ISPRS_dataset(test_ids, ids_type='TEST', gt_type=args.gt_type,
-                             gt_modification=disk(args.ero_disk),
-                             data_files=DATA_FOLDER, label_files=LABEL_FOLDER,
-                             window_size=WINDOW_SIZE, cache=CACHE)
-    
-    # Create unlabeled dataset if needed
-    if unlabeled_ids:
-        unlabeled_set = ISPRS_unsupervised_dataset(unlabeled_ids, data_files=DATA_FOLDER,
-                                                 window_size=WINDOW_SIZE, cache=CACHE)
-        unlabeled_loader = torch.utils.data.DataLoader(unlabeled_set, batch_size)
-    else:
-        unlabeled_loader = None
-    
-    # Create data loaders
-    labeled_loader = torch.utils.data.DataLoader(labeled_set, batch_size)
-    val_loader = torch.utils.data.DataLoader(val_set, batch_size)
-    test_loader = torch.utils.data.DataLoader(test_set, batch_size)
-    
-    # Set up OneCycleLR scheduler now that we have all the dataset information
-    estimated_steps_per_epoch = 10000 // batch_size  # Based on the default 10000 samples per epoch
-    total_steps = args.epochs * estimated_steps_per_epoch
-    
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, 
-        max_lr=base_lr,
-        total_steps=total_steps,
-        pct_start=0.3,  # Warm-up for 30% of training
-        anneal_strategy='cos',
-        div_factor=25.0,  # initial_lr = max_lr/25
-        final_div_factor=1000.0  # min_lr = initial_lr/1000
-    )
-    
-    # Set up experiment name and output location
-    experiment_name = args.experiment_name
-    output_path = set_output_location(experiment_name, OUTPUT_FOLDER)
-    
-    # Train or load the model
-    if args.retrain:
-        train(net, criterion, optimizer, scheduler, labeled_loader, unlabeled_loader,
-             val_loader, epochs, save_epoch, WEIGHTS, batch_size, WINDOW_SIZE, output_path)
-    else:
-        model_weights = args.model_weights
-        net.load_state_dict(torch.load(model_weights))
-    
-    # Test the model
-    test_images = (1/255 * np.asarray(io.imread(DATA_FOLDER.format(id)), dtype='float32') for id in test_ids)
-    test_labels = (np.asarray(io.imread(LABEL_FOLDER.format(id)), dtype='uint8') for id in test_ids)
-    eroded_labels = (convert_from_color(io.imread(LABEL_FOLDER.format(id))) for id in test_ids)
-    
-    stride = args.stride
-    acc_test, all_preds, all_gts = test(net, test_ids, test_images, test_labels, eroded_labels,
-                                       labels, stride, batch_size, window_size=WINDOW_SIZE)
-    
-    # Export results
-    title = f"Results for Semi-Supervised Hierarchical PGM - {experiment_name}"
-    export_results(all_preds, all_gts, OUTPUT_FOLDER, experiment_name,
-                  confusionMat=True, prodAccuracy=True, averageAccuracy=True,
-                  kappaCoeff=True, title=title)
-    
-    # Save segmentation results
-    for pred, ids in zip(all_preds, test_ids):
-        img = convert_to_color(pred)
-        plt.imshow(img)
-        plt.show()
-        io.imsave(f"{output_path}/segmentation_result_area{ids}.png", img)
-
-
-if __name__ == "__main__":
+def main():
+    """Main function that delegates to the working simplified implementation"""
     parser = argparse.ArgumentParser(description='Semi-Supervised Hierarchical PGM with Contrastive Learning')
+    
+    # Use the same arguments as run_simplified_mrf.py
     parser.add_argument('-i', '--input', help='Path of input directory', 
-                        metavar='INPUT_DIR_PATH', default="./input/")
+                      default="./input/")
     parser.add_argument('-o', '--output', help='Path of output directory',
-                        metavar='OUTPUT_DIR_PATH', default="./output/")
-    parser.add_argument('-r', '--retrain', action='store_true', help='Retrain the model')
-    parser.add_argument('-w', '--window', default=(256, 256), type=tuple, nargs='?',
-                        help='Dimension of image patches')
-    parser.add_argument('-b', '--batch_size', default=10, type=int, help='Batch size')
-    parser.add_argument('-d', '--ero_disk', default=8, type=int, help='Size of erosion disk')
-    parser.add_argument('-g', '--gt_type', required=True, choices=['ero', 'full', 'conncomp'],
-                        help='Ground truth type')
-    parser.add_argument('-exp', '--experiment_name', default='hierarchical_pgm_experiment', 
-                        type=str, help='Experiment name')
-    parser.add_argument('-lr', '--base_lr', default=0.0001, type=float, help='Base learning rate')
+                      default="./output/SimplifiedMRF/")
+    parser.add_argument('-c', '--cvae', help='Path to pre-trained CVAE model',
+                      default="./output/Enhanced-CVAE/model_best.pth")
+    parser.add_argument('-w', '--window', nargs=2, type=int, default=[256, 256],
+                      help='Dimension of image patches')
+    parser.add_argument('-b', '--batch_size', default=4, type=int, help='Batch size')
+    parser.add_argument('-lr', '--learning_rate', default=0.001, type=float, help='Learning rate')
     parser.add_argument('-e', '--epochs', default=30, type=int, help='Number of epochs')
-    parser.add_argument('-se', '--save_epoch', default=5, type=int, help='Save model every N epochs')
-    parser.add_argument('-s', '--stride', default=32, type=int, help='Stride for testing')
-    parser.add_argument('-ld', '--latent_dim', default=128, type=int, help='Latent dimension size')
-    parser.add_argument('-md', '--max_depth', default=4, type=int, help='Maximum depth of quadtree')
-    parser.add_argument('-kw', '--kld_weight', default=0.005, type=float, help='KL divergence weight')
-    parser.add_argument('-cw', '--contrastive_weight', default=0.1, type=float, help='Contrastive loss weight')
-    parser.add_argument('-hcw', '--consistency_weight', default=0.05, type=float, help='Hierarchical consistency weight')
-    parser.add_argument('-lp', '--labeled_percentage', default=100, type=int, help='Percentage of labeled data to use')
-    parser.add_argument('-mw', '--model_weights', default='./output/model_final.pth', type=str, help='Path to pretrained weights')
+    parser.add_argument('-ld', '--latent_dim', default=256, type=int, help='CVAE latent dimension')
+    parser.add_argument('-nc', '--n_classes', default=6, type=int, help='Number of classes')
+    parser.add_argument('-m', '--mode', choices=['train', 'validate'], default='train',
+                      help='Mode: train or validate')
+    parser.add_argument('-cp', '--checkpoint', help='Path to model checkpoint for validation',
+                      default=None)
+    parser.add_argument('-lp', '--labeled_percentage', default=100, type=int, 
+                      help='Percentage of labeled data to use (10, 30, 75, 100)')
+    parser.add_argument('-s', '--seed', default=42, type=int,
+                      help='Random seed for reproducibility')
     
     args = parser.parse_args()
-    main(args)
+    
+    # Call the working implementation
+    sys.argv = ['main.py'] + [
+        '-i', args.input,
+        '-o', args.output,
+        '-c', args.cvae,
+        '-w'] + [str(x) for x in args.window] + [
+        '-b', str(args.batch_size),
+        '-lr', str(args.learning_rate),
+        '-e', str(args.epochs),
+        '-ld', str(args.latent_dim),
+        '-nc', str(args.n_classes),
+        '-m', args.mode,
+        '-lp', str(args.labeled_percentage),
+        '-s', str(args.seed)
+    ]
+    
+    if args.checkpoint:
+        sys.argv.extend(['-cp', args.checkpoint])
+    
+    # Call the working main function
+    run_simplified_main()
+
+if __name__ == "__main__":
+    main()
