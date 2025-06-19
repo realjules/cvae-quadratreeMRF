@@ -19,7 +19,7 @@ from skimage import io
 from sklearn.metrics import accuracy_score, jaccard_score, f1_score
 import cv2
 
-from net.fixed_enhanced_cvae import FixedEnhancedCVAE as EnhancedCVAE
+from net.CVAE import CVAE as EnhancedCVAE
 from torch.utils.data import Dataset, DataLoader
 # Import advanced augmentation functions
 from utils.utils_dataset import elastic_transform, get_augmentation_transforms, cutmix_augmentation
