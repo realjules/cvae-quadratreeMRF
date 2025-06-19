@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Simplified implementation of the QuadtreeMRF approach using a more standard
-fully convolutional neural network with hierarchical structure that can be
-trained directly with CVAE features.
+Enhanced training script with multi-scale features and improved architecture.
+Key improvements:
+1. Multi-scale CVAE feature extraction
+2. Enhanced segmentation model with spatial reasoning
+3. Multi-scale loss function with focal loss for class imbalance
+4. Better training monitoring and visualization
 """
 
 import torch
@@ -19,9 +22,13 @@ from skimage import io
 from sklearn.metrics import accuracy_score, jaccard_score, f1_score
 import cv2
 
+# Import the enhanced components
 from net.cvae import EnhancedCVAE
+from net.segmentation_model import MultiScaleSegmentationModel
+from net.loss import MultiScaleLoss, SimpleCrossEntropyLoss
 from torch.utils.data import Dataset, DataLoader
-# Import advanced augmentation functions
+
+# Import augmentation functions
 from utils.utils_dataset import elastic_transform, get_augmentation_transforms, cutmix_augmentation
 
 # Configure PyTorch for deterministic behavior
@@ -32,7 +39,7 @@ np.random.seed(42)
 
 
 class SegmentationDataset(Dataset):
-    """Dataset for semantic segmentation with ground truth labels and enhanced augmentation"""
+    """Dataset for semantic segmentation with enhanced augmentation"""
     def __init__(self, ids, image_files, label_files, window_size=(256, 256), augment=True, 
                  stride=None, enable_cutmix=True, cutmix_prob=0.3):
         self.ids = ids
@@ -40,7 +47,7 @@ class SegmentationDataset(Dataset):
         self.label_files = label_files
         self.window_size = window_size
         self.augment = augment
-        self.stride = stride if stride is not None else window_size[0] // 2  # Default to 50% overlap
+        self.stride = stride if stride is not None else window_size[0] // 2
         self.enable_cutmix = enable_cutmix
         self.cutmix_prob = cutmix_prob
         
@@ -57,24 +64,18 @@ class SegmentationDataset(Dataset):
                 # Load label
                 label_path = self.label_files.format(id)
                 lbl = np.asarray(io.imread(label_path), dtype='int64')
+                
                 # Check if label has 3 channels (RGB), convert to single channel
                 if len(lbl.shape) == 3 and lbl.shape[2] == 3:
-                    # Map colors to class indices (adjust according to your dataset)
                     lbl_mapped = np.zeros((lbl.shape[0], lbl.shape[1]), dtype='int64')
                     
-                    # Common color mapping for ISPRS dataset - adjust these for your dataset
-                    # Impervious surfaces (RGB: 255, 255, 255) -> 0
-                    lbl_mapped[(lbl[:,:,0] > 200) & (lbl[:,:,1] > 200) & (lbl[:,:,2] > 200)] = 0
-                    # Building (RGB: 0, 0, 255) -> 1
-                    lbl_mapped[(lbl[:,:,0] < 50) & (lbl[:,:,1] < 50) & (lbl[:,:,2] > 200)] = 1
-                    # Low vegetation (RGB: 0, 255, 255) -> 2
-                    lbl_mapped[(lbl[:,:,0] < 50) & (lbl[:,:,1] > 200) & (lbl[:,:,2] > 200)] = 2
-                    # Tree (RGB: 0, 255, 0) -> 3
-                    lbl_mapped[(lbl[:,:,0] < 50) & (lbl[:,:,1] > 200) & (lbl[:,:,2] < 50)] = 3
-                    # Car (RGB: 255, 255, 0) -> 4
-                    lbl_mapped[(lbl[:,:,0] > 200) & (lbl[:,:,1] > 200) & (lbl[:,:,2] < 50)] = 4
-                    # Clutter/background (RGB: 255, 0, 0) -> 5
-                    lbl_mapped[(lbl[:,:,0] > 200) & (lbl[:,:,1] < 50) & (lbl[:,:,2] < 50)] = 5
+                    # ISPRS color mapping
+                    lbl_mapped[(lbl[:,:,0] > 200) & (lbl[:,:,1] > 200) & (lbl[:,:,2] > 200)] = 0  # Impervious
+                    lbl_mapped[(lbl[:,:,0] < 50) & (lbl[:,:,1] < 50) & (lbl[:,:,2] > 200)] = 1   # Building  
+                    lbl_mapped[(lbl[:,:,0] < 50) & (lbl[:,:,1] > 200) & (lbl[:,:,2] > 200)] = 2  # Low veg
+                    lbl_mapped[(lbl[:,:,0] < 50) & (lbl[:,:,1] > 200) & (lbl[:,:,2] < 50)] = 3   # Tree
+                    lbl_mapped[(lbl[:,:,0] > 200) & (lbl[:,:,1] > 200) & (lbl[:,:,2] < 50)] = 4  # Car
+                    lbl_mapped[(lbl[:,:,0] > 200) & (lbl[:,:,1] < 50) & (lbl[:,:,2] < 50)] = 5   # Clutter
                     
                     lbl = lbl_mapped
                 
@@ -93,88 +94,50 @@ class SegmentationDataset(Dataset):
                 for j in range(0, width - window_size[1] + 1, self.stride):
                     self.windows.append((img_idx, i, j))
         
-        print(f"Dataset created with {len(self.windows)} patches from {len(self.images)} images with enhanced augmentation")
+        print(f"Dataset created with {len(self.windows)} patches from {len(self.images)} images")
     
     def augment_data(self, image, label):
-        """Apply enhanced random augmentations to the image and label"""
-        # Convert to HWC format for augmentation if image is a tensor
+        """Apply enhanced random augmentations"""
         if torch.is_tensor(image):
             image_np = image.cpu().numpy().transpose(1, 2, 0)
         else:
             image_np = image
             
-        # Convert label to numpy if it's a tensor
         if torch.is_tensor(label):
             label_np = label.cpu().numpy()
         else:
             label_np = label
         
-        # Random horizontal flip
+        # Basic augmentations
         if np.random.random() > 0.5:
             image_np = np.flip(image_np, axis=1).copy()
             label_np = np.flip(label_np, axis=1).copy()
         
-        # Random vertical flip
         if np.random.random() > 0.5:
             image_np = np.flip(image_np, axis=0).copy()
             label_np = np.flip(label_np, axis=0).copy()
         
-        # Random brightness/contrast adjustment (image only)
         if np.random.random() > 0.5:
-            alpha = 0.8 + 0.4 * np.random.random()  # 0.8 to 1.2
-            beta = -0.1 + 0.2 * np.random.random()  # -0.1 to 0.1
+            alpha = 0.8 + 0.4 * np.random.random()
+            beta = -0.1 + 0.2 * np.random.random()
             image_np = np.clip(alpha * image_np + beta, 0, 1)
         
-        # Convert to tensors for intermediate processing
+        # Convert to tensors
         image_tensor = torch.from_numpy(image_np.transpose(2, 0, 1)).float()
         label_tensor = torch.from_numpy(label_np).long()
         
-        # ENHANCED AUGMENTATIONS:
-        
-        # 1. Apply elastic transform with 30% probability
+        # Advanced augmentations
         if np.random.random() > 0.7:
             image_tensor, label_tensor = elastic_transform(
                 image_tensor, label_tensor, 
-                alpha=50 + np.random.random() * 50,  # 50-100 range for alpha
-                sigma=4 + np.random.random() * 2     # 4-6 range for sigma
+                alpha=50 + np.random.random() * 50,
+                sigma=4 + np.random.random() * 2
             )
         
-        # 2. Apply color augmentations with 40% probability
         if np.random.random() > 0.6:
-            # Get color transform
             color_transform = get_augmentation_transforms(p=0.8)
-            # Apply only to the image (not the label)
             image_tensor = color_transform(image_tensor)
         
-        # 3. Random rotation with 20% probability
-        if np.random.random() > 0.8:
-            angle = np.random.randint(-30, 30)  # -30 to +30 degrees
-            
-            # Convert tensors back to numpy for rotation
-            if torch.is_tensor(image_tensor):
-                rot_img = image_tensor.permute(1, 2, 0).cpu().numpy()
-            else:
-                rot_img = image_tensor.transpose(1, 2, 0)
-                
-            if torch.is_tensor(label_tensor):
-                rot_label = label_tensor.cpu().numpy()
-            else:
-                rot_label = label_tensor
-            
-            # Apply rotation
-            center = (rot_img.shape[1] // 2, rot_img.shape[0] // 2)
-            rot_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
-            
-            rot_img = cv2.warpAffine(rot_img, rot_matrix, (rot_img.shape[1], rot_img.shape[0]), 
-                                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-            rot_label = cv2.warpAffine(rot_label, rot_matrix, (rot_label.shape[1], rot_label.shape[0]), 
-                                    flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_REFLECT)
-            
-            # Convert back to tensors
-            image_tensor = torch.from_numpy(rot_img.transpose(2, 0, 1)).float()
-            label_tensor = torch.from_numpy(rot_label).long()
-        
-        # Return the final augmented tensors
         return image_tensor, label_tensor
     
     def __len__(self):
@@ -190,39 +153,33 @@ class SegmentationDataset(Dataset):
         label_patch = label[i:i+self.window_size[0], j:j+self.window_size[1]]
         
         # Convert to torch format
-        image_patch = np.transpose(image_patch, (2, 0, 1))  # HWC -> CHW
+        image_patch = np.transpose(image_patch, (2, 0, 1))
         image_patch = torch.from_numpy(image_patch).float()
         label_patch = torch.from_numpy(label_patch).long()
         
-        # Apply standard augmentations during training
+        # Apply augmentations
         if self.augment:
             image_patch, label_patch = self.augment_data(image_patch, label_patch)
             
-            # Apply CutMix augmentation if enabled and we have more than one image
-            # This is especially important for low-data regimes
+            # CutMix augmentation
             if self.enable_cutmix and len(self.images) > 1 and random.random() < self.cutmix_prob:
-                # Get a random second sample from the dataset
                 second_idx = random.randint(0, len(self.windows) - 1)
-                if second_idx != idx:  # Make sure it's different from current
+                if second_idx != idx:
                     second_img_idx, second_i, second_j = self.windows[second_idx]
                     second_image = self.images[second_img_idx]
                     second_label = self.labels[second_img_idx]
                     
-                    # Extract window
                     second_image_patch = second_image[second_i:second_i+self.window_size[0], 
                                                    second_j:second_j+self.window_size[1], :]
                     second_label_patch = second_label[second_i:second_i+self.window_size[0], 
                                                    second_j:second_j+self.window_size[1]]
                     
-                    # Convert to torch format
                     second_image_patch = np.transpose(second_image_patch, (2, 0, 1))
                     second_image_patch = torch.from_numpy(second_image_patch).float()
                     second_label_patch = torch.from_numpy(second_label_patch).long()
                     
-                    # Apply standard augmentation to second patch
                     second_image_patch, second_label_patch = self.augment_data(second_image_patch, second_label_patch)
                     
-                    # Apply CutMix between the two patches
                     try:
                         image_patch, label_patch = cutmix_augmentation(
                             image_patch, label_patch, 
@@ -230,174 +187,58 @@ class SegmentationDataset(Dataset):
                             alpha=0.5
                         )
                     except ValueError:
-                        # Fall back to original patches if CutMix fails
-                        pass  # Keep original patches if CutMix fails
+                        pass
         
         return image_patch, label_patch
 
 
-class SimplifiedMRF(nn.Module):
-    """
-    A simplified replacement for QuadtreeMRF that uses a hierarchical
-    fully convolutional structure with CRF-like pairwise dependencies.
-    
-    This model is designed to work with CVAE features.
-    """
-    def __init__(self, n_classes=6, feature_dim=256, device="cuda"):
-        super(SimplifiedMRF, self).__init__()
-        self.n_classes = n_classes
-        self.feature_dim = feature_dim
-        self.device = device
-        
-        # Feature adaptation layer
-        self.feature_adaptation = nn.Sequential(
-            nn.Conv2d(feature_dim, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Hierarchical feature extraction
-        # Level 1: Full resolution
-        self.level1 = nn.Sequential(
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Level 2: Half resolution
-        self.downsample1 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.level2 = nn.Sequential(
-            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Level 3: Quarter resolution
-        self.downsample2 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.level3 = nn.Sequential(
-            nn.Conv2d(128 + 64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Spatial context enhancement with dilated convolutions
-        self.context = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=3, padding=2, dilation=2),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=3, padding=4, dilation=4),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
-        )
-        
-        # Upsampling and fusion
-        self.upsample3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.fuse3 = nn.Sequential(
-            nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
-        )
-        
-        self.upsample2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.fuse2 = nn.Sequential(
-            nn.Conv2d(64 + 64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
-        )
-        
-        # CRF-like smoothing (simulates pairwise potentials)
-        self.pairwise = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, n_classes, kernel_size=1)
-        )
-    
-    def forward(self, features):
-        """Forward pass through the simplified MRF model"""
-        # Feature adaptation
-        x = self.feature_adaptation(features)
-        
-        # Multi-scale feature extraction
-        f1 = self.level1(x)
-        
-        x_down1 = self.downsample1(x)
-        f2 = self.level2(torch.cat([x_down1, self.downsample1(f1)], dim=1))
-        
-        x_down2 = self.downsample2(x_down1)
-        f3 = self.level3(torch.cat([x_down2, self.downsample2(f2)], dim=1))
-        
-        # Context enhancement
-        f3_ctx = self.context(f3)
-        
-        # Hierarchical fusion
-        f3_up = self.upsample3(f3_ctx)
-        f2_fused = self.fuse3(torch.cat([f2, f3_up], dim=1))
-        
-        f2_up = self.upsample2(f2_fused)
-        f1_fused = self.fuse2(torch.cat([f1, f2_up], dim=1))
-        
-        # Final prediction with CRF-like smoothing
-        logits = self.pairwise(f1_fused)
-        
-        return logits
-
-
-class SegmentationTrainer:
-    """Training class for the SimplifiedMRF model with CVAE features"""
-    def __init__(self, cvae_path, n_classes=6, feature_dim=256, learning_rate=0.001, device="cuda"):
-        """
-        Initialize the trainer with a pre-trained CVAE for feature extraction
-        """
+class EnhancedSegmentationTrainer:
+    """Enhanced training class with multi-scale features and improved architecture"""
+    def __init__(self, cvae_path, n_classes=6, learning_rate=0.001, device="cuda", use_multi_scale_loss=True):
         self.device = device
         self.n_classes = n_classes
-        self.feature_dim = feature_dim
+        self.use_multi_scale_loss = use_multi_scale_loss
         
         # Load pre-trained CVAE
-        self.cvae = self._load_cvae(cvae_path, feature_dim)
+        self.cvae = self._load_cvae(cvae_path)
         
-        # Create the simplified MRF model
-        self.model = SimplifiedMRF(
+        # Use enhanced segmentation model
+        self.model = MultiScaleSegmentationModel(
             n_classes=n_classes,
-            feature_dim=feature_dim,
             device=device
         ).to(device)
         
-        # Setup optimizer
+        # Enhanced optimizer
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=learning_rate,
-            weight_decay=0.0001,
-            eps=1e-5
+            weight_decay=0.0005,
+            eps=1e-8,
+            betas=(0.9, 0.999)
         )
         
-        # Setup loss function with class weighting for imbalanced data
-        self.class_weights = None
-        self.criterion = nn.CrossEntropyLoss(ignore_index=255, reduction='mean')
+        # Choose loss function
+        if use_multi_scale_loss:
+            self.criterion = MultiScaleLoss(n_classes=n_classes, device=device)
+        else:
+            # Fallback to simple loss for compatibility
+            self.criterion = SimpleCrossEntropyLoss()
         
-        # Create metrics tracker
+        # Learning rate scheduler
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            self.optimizer, T_0=10, T_mult=2, eta_min=1e-6
+        )
+        
+        # Metrics tracking
         self.metrics = {
-            'train_loss': [],
-            'val_loss': [],
-            'val_accuracy': [],
-            'val_mean_iou': [],
-            'val_f1': []
+            'train_loss': [], 'val_loss': [], 'val_accuracy': [],
+            'val_mean_iou': [], 'val_f1': [], 'train_loss_components': []
         }
     
-    def _load_cvae(self, model_path, feature_dim):
+    def _load_cvae(self, model_path):
         """Load pre-trained CVAE model"""
-        # Use the new FixedEnhancedCVAE with the right dimensions
-        # Note: Make sure to use the same hidden_dims as in training
-        cvae = EnhancedCVAE(
-            input_channels=3, 
-            latent_dim=feature_dim,
-            hidden_dims=[64, 128, 256, 512]
-        )
+        cvae = EnhancedCVAE(input_channels=3, latent_dim=256, hidden_dims=[64, 128, 256])
         
-        # Load weights - use strict=False to handle potential differences
         try:
             cvae.load_state_dict(torch.load(
                 model_path, 
@@ -409,492 +250,442 @@ class SegmentationTrainer:
             print(f"Warning when loading CVAE weights: {e}")
             print("Proceeding with newly initialized model - performance may be affected")
         
-        # Move to device and set to evaluation mode
         cvae = cvae.to(self.device)
         cvae.eval()
-        
         return cvae
     
     def extract_cvae_features(self, images):
-        """Extract features from the pre-trained CVAE"""
+        """Extract multi-scale features from the pre-trained CVAE"""
         with torch.no_grad():
             try:
                 # Get outputs from CVAE
                 outputs = self.cvae(images)
                 
-                # Extract relevant features from the fixed enhanced CVAE
-                z = outputs['z']  # latent code (batch_size, 512)
-                encoder_features = outputs['encoder_features']  # List of encoder features [e1, e2, e3]
+                # Extract ALL encoder features, not just the deepest
+                z = outputs['z']  # latent code (batch_size, 256)
+                encoder_features = outputs['encoder_features']  # [e1, e2, e3]
                 
-                # Use the deepest encoder features (now at index 2)
-                # The encoder features for FixedEnhancedCVAE are [e1(64), e2(128), e3(256)]
-                deep_features = encoder_features[2]  # Shape: [batch_size, 256, 32, 32]
+                # Multi-scale features with preserved spatial information
+                feat_l1 = encoder_features[0]  # [B, 64, 128, 128]
+                feat_l2 = encoder_features[1]  # [B, 128, 64, 64]
+                feat_l3 = encoder_features[2]  # [B, 256, 32, 32]
                 
-                # Size of input and feature map
-                input_size = images.size(-1)  # 256
-                feature_size = deep_features.size(-1)  # 32
+                # Global context from latent vector
+                z_global = z.unsqueeze(-1).unsqueeze(-1)  # [B, 256, 1, 1]
                 
-                # Expand latent vector to spatial dimensions
-                z_spatial = z.unsqueeze(-1).unsqueeze(-1)  # [batch_size, 512, 1, 1]
-                z_spatial = F.interpolate(
-                    z_spatial,
-                    size=(feature_size, feature_size),  # [batch_size, 512, 32, 32]
-                    mode='bilinear',
-                    align_corners=False
-                )
+                # Create feature pyramid with proper channel alignment
+                target_channels = 256
                 
-                # Create a projection layer to match the expected feature dimensions
-                # We need to reduce the combined channels to match the model's expected input
-                combined = torch.cat([z_spatial, deep_features], dim=1)  # [batch_size, 512+256, 32, 32]
+                # Project each level to target channels using learnable projections
+                if not hasattr(self, 'level_projections'):
+                    self.level_projections = nn.ModuleDict({
+                        'proj_l1': nn.Sequential(
+                            nn.Conv2d(64, target_channels//4, 1),
+                            nn.BatchNorm2d(target_channels//4),
+                            nn.ReLU()
+                        ),
+                        'proj_l2': nn.Sequential(
+                            nn.Conv2d(128, target_channels//2, 1), 
+                            nn.BatchNorm2d(target_channels//2),
+                            nn.ReLU()
+                        ),
+                        'proj_l3': nn.Sequential(
+                            nn.Conv2d(256, target_channels, 1),
+                            nn.BatchNorm2d(target_channels), 
+                            nn.ReLU()
+                        ),
+                        'proj_global': nn.Sequential(
+                            nn.Conv2d(256, target_channels, 1),
+                            nn.BatchNorm2d(target_channels),
+                            nn.ReLU()
+                        )
+                    }).to(self.device)
                 
-                # Create or update projection layer if needed
-                if not hasattr(self, 'projection') or self.projection.in_channels != combined.size(1):
-                    self.projection = nn.Conv2d(
-                        combined.size(1),  # 512+256 = 768
-                        self.feature_dim,  # Usually 512
-                        kernel_size=1
-                    ).to(self.device)
+                # Project features to aligned channels
+                feat_l1_proj = self.level_projections['proj_l1'](feat_l1)  # [B, 64, 128, 128]
+                feat_l2_proj = self.level_projections['proj_l2'](feat_l2)  # [B, 128, 64, 64]  
+                feat_l3_proj = self.level_projections['proj_l3'](feat_l3)  # [B, 256, 32, 32]
                 
-                # Project to expected dimension
-                features = self.projection(combined)  # [batch_size, feature_dim, 32, 32]
+                # Expand global context to match l3 spatial size
+                z_spatial = F.interpolate(z_global, size=(32, 32), mode='bilinear', align_corners=False)
+                z_proj = self.level_projections['proj_global'](z_spatial)  # [B, 256, 32, 32]
                 
-                return features.detach()  # detach to avoid backprop into CVAE
+                # Create Feature Pyramid Network
+                # Start from the most semantic level (l3 + global)
+                p3 = feat_l3_proj + z_proj  # [B, 256, 32, 32]
                 
-            except RuntimeError as e:
-                print(f"Warning in feature extraction: {e}")
-                # Create random features if all else fails
-                return torch.randn(
-                    images.size(0), 
-                    self.feature_dim, 
-                    images.size(2) // 8, 
-                    images.size(3) // 8,
-                    device=self.device
-                ) * 0.1
+                # Propagate semantic info to level 2
+                p3_up = F.interpolate(p3, size=(64, 64), mode='bilinear', align_corners=False)
+                p2 = feat_l2_proj + p3_up  # [B, 128, 64, 64]
+                
+                # Propagate semantic info to level 1  
+                p2_up = F.interpolate(p2, size=(128, 128), mode='bilinear', align_corners=False)
+                p1 = feat_l1_proj + p2_up  # [B, 64, 128, 128]
+                
+                # Return multi-scale features for the segmentation model
+                return {
+                    'p1': p1,  # High resolution, low semantics
+                    'p2': p2,  # Medium resolution, medium semantics  
+                    'p3': p3,  # Low resolution, high semantics
+                    'global_context': z_proj  # Global context
+                }
+                
+            except Exception as e:
+                print(f"Error in multi-scale feature extraction: {e}")
+                # Fallback to single-scale random features
+                return {
+                    'p1': torch.randn(images.size(0), 64, 128, 128, device=self.device) * 0.1,
+                    'p2': torch.randn(images.size(0), 128, 64, 64, device=self.device) * 0.1,
+                    'p3': torch.randn(images.size(0), 256, 32, 32, device=self.device) * 0.1,
+                    'global_context': torch.randn(images.size(0), 256, 32, 32, device=self.device) * 0.1
+                }
     
-    def update_class_weights(self, labels):
-        """Update class weights based on label distribution"""
-        # Count class frequencies
-        counts = torch.zeros(self.n_classes, device=self.device)
-        for c in range(self.n_classes):
-            counts[c] = (labels == c).sum().float()
+    def train_step(self, images, labels):
+        """Enhanced training step with multi-scale supervision"""
+        # Extract multi-scale features
+        multi_scale_features = self.extract_cvae_features(images)
         
-        # Add small constant to avoid division by zero
-        counts = counts + 1.0
+        # Forward pass through enhanced model
+        outputs = self.model(multi_scale_features)
         
-        # Compute inverse frequency weights
-        weights = 1.0 / counts
+        # Multi-scale loss computation
+        if self.use_multi_scale_loss:
+            loss, loss_components = self.criterion(
+                outputs, labels, original_size=(images.size(2), images.size(3))
+            )
+        else:
+            loss, loss_components = self.criterion(outputs, labels)
         
-        # Normalize weights
-        weights = weights / weights.sum() * self.n_classes
+        # Backward pass
+        self.optimizer.zero_grad()
+        loss.backward()
         
-        # Update class weights
-        self.class_weights = weights
+        # Gradient clipping for stability
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         
-        # Update criterion
-        self.criterion = nn.CrossEntropyLoss(
-            weight=self.class_weights,
-            ignore_index=255,
-            reduction='mean'
-        )
+        # Update weights
+        self.optimizer.step()
+        
+        return loss.item(), loss_components, outputs
     
     def compute_metrics(self, predictions, targets):
-        """Compute segmentation metrics"""
-        # Convert to numpy arrays
+        """Compute detailed metrics including per-class performance"""
         pred_np = predictions.cpu().numpy().flatten()
         target_np = targets.cpu().numpy().flatten()
         
-        # Remove ignored pixels (255)
+        # Remove ignored pixels
         valid_idx = target_np != 255
-        pred_np = pred_np[valid_idx]
+        pred_np = pred_np[valid_idx] 
         target_np = target_np[valid_idx]
         
-        # Compute metrics
+        # Overall metrics
         acc = accuracy_score(target_np, pred_np)
-        iou = jaccard_score(target_np, pred_np, average='macro', labels=range(self.n_classes), zero_division=0)
+        mean_iou = jaccard_score(target_np, pred_np, average='macro', labels=range(self.n_classes), zero_division=0)
         f1 = f1_score(target_np, pred_np, average='macro', labels=range(self.n_classes), zero_division=0)
+        
+        # Per-class metrics for detailed analysis
+        per_class_iou = jaccard_score(target_np, pred_np, average=None, labels=range(self.n_classes), zero_division=0)
+        per_class_f1 = f1_score(target_np, pred_np, average=None, labels=range(self.n_classes), zero_division=0)
         
         return {
             'accuracy': acc,
-            'mean_iou': iou,
-            'f1_score': f1
+            'mean_iou': mean_iou,
+            'f1_score': f1,
+            'per_class_iou': per_class_iou,
+            'per_class_f1': per_class_f1
         }
     
     def train(self, train_loader, val_loader, epochs, save_dir):
-        """Train the SimplifiedMRF model"""
-        # Create save directory
+        """Enhanced training loop with improved monitoring"""
         os.makedirs(save_dir, exist_ok=True)
-        
-        # Track best validation performance
         best_iou = 0.0
         
-        # Training loop
         for epoch in range(1, epochs + 1):
-            # Clear GPU cache before each epoch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                
             # Training phase
             self.model.train()
-            train_loss = 0.0
+            epoch_loss = 0.0
+            epoch_loss_components = {}
             
-            # Progress bar
             train_bar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs} [Train]")
             
             for batch_idx, (images, labels) in enumerate(train_bar):
-                # Move to device
-                images = images.to(self.device)
-                labels = labels.to(self.device)
+                images, labels = images.to(self.device), labels.to(self.device)
                 
-                # Update class weights on first batch
-                if epoch == 1 and batch_idx == 0 and self.class_weights is None:
-                    self.update_class_weights(labels)
+                # Enhanced training step
+                loss, loss_components, outputs = self.train_step(images, labels)
                 
-                # Extract features from CVAE with reduced memory footprint
-                with torch.no_grad():
-                    # Process in smaller batches if needed
-                    batch_size = images.size(0)
-                    if batch_size > 4:  # Use smaller batches for feature extraction
-                        cvae_features = []
-                        for i in range(0, batch_size, 4):
-                            mini_batch = images[i:i+4]
-                            mini_features = self.extract_cvae_features(mini_batch)
-                            cvae_features.append(mini_features)
-                        cvae_features = torch.cat(cvae_features, dim=0)
-                    else:
-                        cvae_features = self.extract_cvae_features(images)
+                # Accumulate loss components
+                for key, value in loss_components.items():
+                    if key not in epoch_loss_components:
+                        epoch_loss_components[key] = 0.0
+                    epoch_loss_components[key] += value
                 
-                # Forward pass through the MRF model
-                logits = self.model(cvae_features)
-                
-                # Resize logits to match label size if needed
-                if logits.shape[2:] != labels.shape[1:]:
-                    logits = F.interpolate(
-                        logits,
-                        size=(labels.shape[1], labels.shape[2]),
-                        mode='bilinear',
-                        align_corners=False
-                    )
-                
-                # Compute loss
-                loss = self.criterion(logits, labels)
-                
-                # Backward pass
-                self.optimizer.zero_grad()
-                loss.backward()
-                
-                # Gradient clipping for stability
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                
-                # Update weights
-                self.optimizer.step()
-                
-                # Update statistics
-                train_loss += loss.item()
-                train_bar.set_postfix({"loss": train_loss / (batch_idx + 1)})
+                epoch_loss += loss
+                train_bar.set_postfix({
+                    "loss": epoch_loss / (batch_idx + 1),
+                    "lr": self.optimizer.param_groups[0]['lr']
+                })
             
-            # Compute average training loss
-            avg_train_loss = train_loss / len(train_loader)
-            self.metrics['train_loss'].append(avg_train_loss)
+            # Update learning rate
+            self.scheduler.step()
             
             # Validation phase
-            self.model.eval()
-            val_loss = 0.0
-            all_preds = []
-            all_targets = []
+            val_metrics = self.validate(val_loader)
             
-            # Progress bar
-            val_bar = tqdm(val_loader, desc=f"Epoch {epoch}/{epochs} [Val]")
+            # Save metrics
+            avg_train_loss = epoch_loss / len(train_loader)
+            self.metrics['train_loss'].append(avg_train_loss)
+            self.metrics['val_loss'].append(val_metrics['loss'])
+            self.metrics['val_accuracy'].append(val_metrics['accuracy'])
+            self.metrics['val_mean_iou'].append(val_metrics['mean_iou'])
+            self.metrics['val_f1'].append(val_metrics['f1_score'])
+            self.metrics['train_loss_components'].append(epoch_loss_components)
             
-            with torch.no_grad():
-                for batch_idx, (images, labels) in enumerate(val_bar):
-                    # Move to device
-                    images = images.to(self.device)
-                    labels = labels.to(self.device)
-                    
-                    # Extract features from CVAE with reduced memory footprint
-                    # Process in smaller batches if needed
-                    batch_size = images.size(0)
-                    if batch_size > 4:  # Use smaller batches for feature extraction
-                        cvae_features = []
-                        for i in range(0, batch_size, 4):
-                            mini_batch = images[i:i+4]
-                            mini_features = self.extract_cvae_features(mini_batch)
-                            cvae_features.append(mini_features)
-                        cvae_features = torch.cat(cvae_features, dim=0)
-                    else:
-                        cvae_features = self.extract_cvae_features(images)
-                    
-                    # Forward pass
-                    logits = self.model(cvae_features)
-                    
-                    # Resize logits to match label size if needed
-                    if logits.shape[2:] != labels.shape[1:]:
-                        logits = F.interpolate(
-                            logits,
-                            size=(labels.shape[1], labels.shape[2]),
-                            mode='bilinear',
-                            align_corners=False
-                        )
-                    
-                    # Compute loss
-                    loss = self.criterion(logits, labels)
-                    
-                    # Get predictions
-                    preds = torch.argmax(logits, dim=1)
-                    
-                    # Update statistics
-                    val_loss += loss.item()
-                    val_bar.set_postfix({"loss": val_loss / (batch_idx + 1)})
-                    
-                    # Store predictions and targets for metric computation
-                    all_preds.append(preds)
-                    all_targets.append(labels)
-            
-            # Compute average validation loss
-            avg_val_loss = val_loss / len(val_loader)
-            self.metrics['val_loss'].append(avg_val_loss)
-            
-            # Concatenate predictions and targets
-            all_preds = torch.cat(all_preds, dim=0)
-            all_targets = torch.cat(all_targets, dim=0)
-            
-            # Compute validation metrics
-            metrics = self.compute_metrics(all_preds, all_targets)
-            self.metrics['val_accuracy'].append(metrics['accuracy'])
-            self.metrics['val_mean_iou'].append(metrics['mean_iou'])
-            self.metrics['val_f1'].append(metrics['f1_score'])
-            
-            # Visualize some segmentation results
-            if epoch % 5 == 0 or epoch == epochs:
-                self.visualize_segmentations(images[:8], labels[:8], all_preds[:8], epoch, save_dir)
-            
-            # Print epoch summary
+            # Enhanced logging
             print(f"Epoch {epoch}/{epochs}:")
             print(f"  Train Loss: {avg_train_loss:.6f}")
-            print(f"  Val Loss: {avg_val_loss:.6f}")
-            print(f"  Val Accuracy: {metrics['accuracy']:.4f}")
-            print(f"  Val Mean IoU: {metrics['mean_iou']:.4f}")
-            print(f"  Val F1 Score: {metrics['f1_score']:.4f}")
+            print(f"  Val Loss: {val_metrics['loss']:.6f}")
+            print(f"  Val Accuracy: {val_metrics['accuracy']:.4f}")
+            print(f"  Val Mean IoU: {val_metrics['mean_iou']:.4f}")
+            print(f"  Val F1 Score: {val_metrics['f1_score']:.4f}")
+            print(f"  Learning Rate: {self.optimizer.param_groups[0]['lr']:.8f}")
+            
+            # Print per-class F1 scores for debugging
+            if 'per_class_f1' in val_metrics:
+                class_names = ["roads", "buildings", "low veg.", "trees", "cars", "clutter"]
+                print("  Per-class F1 scores:")
+                for i, (name, f1_score) in enumerate(zip(class_names, val_metrics['per_class_f1'])):
+                    print(f"    {name}: {f1_score:.3f}")
+            
+            # Print loss components for debugging
+            if self.use_multi_scale_loss and epoch_loss_components:
+                print("  Loss Components:")
+                for key, value in epoch_loss_components.items():
+                    if key != 'total_loss':
+                        print(f"    {key}: {value/len(train_loader):.6f}")
             
             # Save best model
-            if metrics['mean_iou'] > best_iou:
-                best_iou = metrics['mean_iou']
-                torch.save(self.model.state_dict(), f"{save_dir}/model_best.pth")
-                print(f"  New best model saved with Mean IoU: {best_iou:.4f}")
-            
-            # Save checkpoint
-            if epoch % 5 == 0 or epoch == epochs:
+            if val_metrics['mean_iou'] > best_iou:
+                best_iou = val_metrics['mean_iou']
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'best_iou': best_iou,
                     'metrics': self.metrics
-                }, f"{save_dir}/checkpoint_epoch{epoch}.pth")
+                }, f"{save_dir}/model_best.pth")
+                print(f"  New best model saved with Mean IoU: {best_iou:.4f}")
             
-            # Plot and save training curves
+            # Enhanced visualizations every 5 epochs
+            if epoch % 5 == 0:
+                self.visualize_results(images[:4], labels[:4], outputs, epoch, save_dir)
+            
+            # Plot training curves
             self.plot_training_curves(save_dir)
-        
-        print("Training completed!")
     
-    def plot_training_curves(self, save_dir):
-        """Plot and save training curves"""
-        epochs = range(1, len(self.metrics['train_loss']) + 1)
+    def validate(self, val_loader):
+        """Enhanced validation with detailed metrics"""
+        self.model.eval()
+        val_loss = 0.0
+        all_preds = []
+        all_targets = []
         
-        plt.figure(figsize=(15, 10))
+        with torch.no_grad():
+            for images, labels in tqdm(val_loader, desc="Validating"):
+                images, labels = images.to(self.device), labels.to(self.device)
+                
+                # Multi-scale features and prediction
+                multi_scale_features = self.extract_cvae_features(images)
+                outputs = self.model(multi_scale_features)
+                
+                # Loss computation
+                if self.use_multi_scale_loss:
+                    loss, _ = self.criterion(outputs, labels, (images.size(2), images.size(3)))
+                else:
+                    loss, _ = self.criterion(outputs, labels)
+                val_loss += loss.item()
+                
+                # Get final predictions
+                if isinstance(outputs, dict) and 'final_segmentation' in outputs:
+                    final_seg = outputs['final_segmentation']
+                else:
+                    final_seg = outputs
+                    
+                if final_seg.size(2) != labels.size(1):
+                    final_seg = F.interpolate(final_seg, size=labels.shape[1:], mode='bilinear', align_corners=False)
+                
+                preds = torch.argmax(final_seg, dim=1)
+                all_preds.append(preds)
+                all_targets.append(labels)
         
-        # Loss curves
-        plt.subplot(2, 2, 1)
-        plt.plot(epochs, self.metrics['train_loss'], 'b-', label='Train Loss')
-        plt.plot(epochs, self.metrics['val_loss'], 'r-', label='Val Loss')
-        plt.title('Loss Curves')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.legend()
-        plt.grid(True)
+        # Concatenate all predictions and targets
+        all_preds = torch.cat(all_preds, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
         
-        # Accuracy curve
-        plt.subplot(2, 2, 2)
-        plt.plot(epochs, self.metrics['val_accuracy'], 'g-')
-        plt.title('Validation Accuracy')
-        plt.xlabel('Epoch')
-        plt.ylabel('Accuracy')
-        plt.grid(True)
+        # Compute enhanced metrics
+        metrics = self.compute_metrics(all_preds, all_targets)
+        metrics['loss'] = val_loss / len(val_loader)
         
-        # Mean IoU curve
-        plt.subplot(2, 2, 3)
-        plt.plot(epochs, self.metrics['val_mean_iou'], 'm-')
-        plt.title('Validation Mean IoU')
-        plt.xlabel('Epoch')
-        plt.ylabel('Mean IoU')
-        plt.grid(True)
-        
-        # F1 Score curve
-        plt.subplot(2, 2, 4)
-        plt.plot(epochs, self.metrics['val_f1'], 'c-')
-        plt.title('Validation F1 Score')
-        plt.xlabel('Epoch')
-        plt.ylabel('F1 Score')
-        plt.grid(True)
-        
-        plt.tight_layout()
-        plt.savefig(f"{save_dir}/training_curves.png")
-        plt.close()
+        return metrics
     
-    def visualize_segmentations(self, images, labels, predictions, epoch, save_dir):
-        """Visualize segmentation results"""
-        # Define color map for segmentation visualization
-        colors = [
+    def visualize_results(self, images, labels, outputs, epoch, save_dir):
+        """Enhanced visualization showing multi-scale predictions"""
+        colors = np.array([
             [255, 255, 255],  # Impervious surfaces (white)
             [0, 0, 255],      # Building (blue)
             [0, 255, 255],    # Low vegetation (cyan)
             [0, 255, 0],      # Tree (green)
             [255, 255, 0],    # Car (yellow)
             [255, 0, 0]       # Clutter (red)
-        ]
-        colors = np.array(colors)
+        ])
         
-        # Number of samples to visualize
-        n_samples = min(8, images.size(0))
+        n_samples = min(4, images.size(0))
         
-        # Create figure
-        fig, axes = plt.subplots(n_samples, 3, figsize=(12, 4 * n_samples))
-        
-        for i in range(n_samples):
-            # Get data for this sample
-            img = images[i].cpu().numpy().transpose(1, 2, 0)
-            lbl = labels[i].cpu().numpy()
-            pred = predictions[i].cpu().numpy()
+        # Check if we have multi-scale predictions
+        if isinstance(outputs, dict) and 'multi_scale_predictions' in outputs:
+            # Multi-scale visualization
+            fig, axes = plt.subplots(n_samples, 5, figsize=(20, 4 * n_samples))
             
-            # Create colored segmentation maps
-            lbl_colored = np.zeros((lbl.shape[0], lbl.shape[1], 3), dtype=np.uint8)
-            pred_colored = np.zeros((pred.shape[0], pred.shape[1], 3), dtype=np.uint8)
-            
-            for c in range(self.n_classes):
-                lbl_colored[lbl == c] = colors[c]
-                pred_colored[pred == c] = colors[c]
-            
-            # Display images
-            if n_samples == 1:
-                axes[0].imshow(np.clip(img, 0, 1))
-                axes[0].set_title("Input Image")
-                axes[0].axis("off")
-                
-                axes[1].imshow(lbl_colored)
-                axes[1].set_title("Ground Truth")
-                axes[1].axis("off")
-                
-                axes[2].imshow(pred_colored)
-                axes[2].set_title("Prediction")
-                axes[2].axis("off")
-            else:
+            for i in range(n_samples):
+                # Original image
+                img = images[i].cpu().numpy().transpose(1, 2, 0)
                 axes[i, 0].imshow(np.clip(img, 0, 1))
-                axes[i, 0].set_title("Input Image" if i == 0 else "")
+                axes[i, 0].set_title("Input" if i == 0 else "")
                 axes[i, 0].axis("off")
                 
-                axes[i, 1].imshow(lbl_colored)
+                # Ground truth
+                gt = labels[i].cpu().numpy()
+                gt_colored = np.zeros((gt.shape[0], gt.shape[1], 3), dtype=np.uint8)
+                for c in range(self.n_classes):
+                    gt_colored[gt == c] = colors[c]
+                axes[i, 1].imshow(gt_colored)
                 axes[i, 1].set_title("Ground Truth" if i == 0 else "")
                 axes[i, 1].axis("off")
                 
-                axes[i, 2].imshow(pred_colored)
-                axes[i, 2].set_title("Prediction" if i == 0 else "")
-                axes[i, 2].axis("off")
+                # Multi-scale predictions
+                multi_scale_preds = outputs['multi_scale_predictions']
+                for j, (pred, title) in enumerate(zip(multi_scale_preds, ["Coarse", "Medium", "Fine"])):
+                    pred_resized = F.interpolate(pred[i:i+1], size=gt.shape, mode='bilinear', align_corners=False)
+                    pred_class = torch.argmax(pred_resized, dim=1)[0].cpu().numpy()
+                    
+                    pred_colored = np.zeros((pred_class.shape[0], pred_class.shape[1], 3), dtype=np.uint8)
+                    for c in range(self.n_classes):
+                        pred_colored[pred_class == c] = colors[c]
+                    
+                    axes[i, j + 2].imshow(pred_colored)
+                    axes[i, j + 2].set_title(title if i == 0 else "")
+                    axes[i, j + 2].axis("off")
+        else:
+            # Simple visualization for non-multi-scale outputs
+            fig, axes = plt.subplots(n_samples, 3, figsize=(12, 4 * n_samples))
+            
+            for i in range(n_samples):
+                # Original image
+                img = images[i].cpu().numpy().transpose(1, 2, 0)
+                if n_samples == 1:
+                    axes[0].imshow(np.clip(img, 0, 1))
+                    axes[0].set_title("Input Image")
+                    axes[0].axis("off")
+                else:
+                    axes[i, 0].imshow(np.clip(img, 0, 1))
+                    axes[i, 0].set_title("Input Image" if i == 0 else "")
+                    axes[i, 0].axis("off")
+                
+                # Ground truth
+                gt = labels[i].cpu().numpy()
+                gt_colored = np.zeros((gt.shape[0], gt.shape[1], 3), dtype=np.uint8)
+                for c in range(self.n_classes):
+                    gt_colored[gt == c] = colors[c]
+                
+                if n_samples == 1:
+                    axes[1].imshow(gt_colored)
+                    axes[1].set_title("Ground Truth")
+                    axes[1].axis("off")
+                else:
+                    axes[i, 1].imshow(gt_colored)
+                    axes[i, 1].set_title("Ground Truth" if i == 0 else "")
+                    axes[i, 1].axis("off")
+                
+                # Prediction
+                if isinstance(outputs, dict) and 'final_segmentation' in outputs:
+                    pred_tensor = outputs['final_segmentation'][i]
+                else:
+                    pred_tensor = outputs[i]
+                
+                if pred_tensor.dim() == 3:
+                    pred_class = torch.argmax(pred_tensor, dim=0).cpu().numpy()
+                else:
+                    pred_class = pred_tensor.cpu().numpy()
+                
+                pred_colored = np.zeros((pred_class.shape[0], pred_class.shape[1], 3), dtype=np.uint8)
+                for c in range(self.n_classes):
+                    pred_colored[pred_class == c] = colors[c]
+                
+                if n_samples == 1:
+                    axes[2].imshow(pred_colored)
+                    axes[2].set_title("Prediction")
+                    axes[2].axis("off")
+                else:
+                    axes[i, 2].imshow(pred_colored)
+                    axes[i, 2].set_title("Prediction" if i == 0 else "")
+                    axes[i, 2].axis("off")
         
         plt.tight_layout()
-        plt.savefig(f"{save_dir}/segmentation_epoch{epoch}.png")
+        plt.savefig(f"{save_dir}/results_epoch{epoch}.png", dpi=150, bbox_inches='tight')
         plt.close()
     
-    def validate(self, val_loader, output_dir):
-        """Validate the model on the validation set"""
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
+    def plot_training_curves(self, save_dir):
+        """Enhanced training curve visualization"""
+        if len(self.metrics['train_loss']) == 0:
+            return
+            
+        epochs = range(1, len(self.metrics['train_loss']) + 1)
         
-        # Set model to evaluation mode
-        self.model.eval()
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         
-        # Validation variables
-        val_loss = 0.0
-        all_preds = []
-        all_targets = []
+        # Loss curves
+        axes[0, 0].plot(epochs, self.metrics['train_loss'], 'b-', label='Train Loss', linewidth=2)
+        axes[0, 0].plot(epochs, self.metrics['val_loss'], 'r-', label='Val Loss', linewidth=2)
+        axes[0, 0].set_title('Training and Validation Loss', fontsize=14, fontweight='bold')
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('Loss')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
         
-        # Progress bar
-        val_bar = tqdm(val_loader, desc=f"Validating")
+        # Accuracy
+        axes[0, 1].plot(epochs, self.metrics['val_accuracy'], 'g-', linewidth=2)
+        axes[0, 1].set_title('Validation Accuracy', fontsize=14, fontweight='bold')
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('Accuracy')
+        axes[0, 1].grid(True, alpha=0.3)
         
-        with torch.no_grad():
-            for batch_idx, (images, labels) in enumerate(val_bar):
-                # Move to device
-                images = images.to(self.device)
-                labels = labels.to(self.device)
-                
-                # Extract features from CVAE
-                cvae_features = self.extract_cvae_features(images)
-                
-                # Forward pass
-                logits = self.model(cvae_features)
-                
-                # Resize logits to match label size if needed
-                if logits.shape[2:] != labels.shape[1:]:
-                    logits = F.interpolate(
-                        logits,
-                        size=(labels.shape[1], labels.shape[2]),
-                        mode='bilinear',
-                        align_corners=False
-                    )
-                
-                # Compute loss
-                loss = self.criterion(logits, labels)
-                
-                # Get predictions
-                preds = torch.argmax(logits, dim=1)
-                
-                # Update statistics
-                val_loss += loss.item()
-                val_bar.set_postfix({"loss": val_loss / (batch_idx + 1)})
-                
-                # Store predictions and targets for metric computation
-                all_preds.append(preds)
-                all_targets.append(labels)
-                
-                # Visualize first few batches
-                if batch_idx < 4:
-                    self.visualize_segmentations(
-                        images, labels, preds, f"val_batch{batch_idx}", output_dir
-                    )
+        # Mean IoU
+        axes[1, 0].plot(epochs, self.metrics['val_mean_iou'], 'm-', linewidth=2)
+        axes[1, 0].set_title('Validation Mean IoU', fontsize=14, fontweight='bold')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Mean IoU')
+        axes[1, 0].grid(True, alpha=0.3)
         
-        # Compute average validation loss
-        avg_val_loss = val_loss / len(val_loader)
+        # F1 Score
+        axes[1, 1].plot(epochs, self.metrics['val_f1'], 'c-', linewidth=2)
+        axes[1, 1].set_title('Validation F1 Score', fontsize=14, fontweight='bold')
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('F1 Score')
+        axes[1, 1].grid(True, alpha=0.3)
         
-        # Concatenate predictions and targets
-        all_preds = torch.cat(all_preds, dim=0)
-        all_targets = torch.cat(all_targets, dim=0)
-        
-        # Compute validation metrics
-        metrics = self.compute_metrics(all_preds, all_targets)
-        
-        # Print results
-        print("Validation Results:")
-        print(f"  Loss: {avg_val_loss:.6f}")
-        print(f"  Accuracy: {metrics['accuracy']:.4f}")
-        print(f"  Mean IoU: {metrics['mean_iou']:.4f}")
-        print(f"  F1 Score: {metrics['f1_score']:.4f}")
-        
-        # Save results to file
-        with open(f"{output_dir}/validation_metrics.txt", "w") as f:
-            f.write(f"Loss: {avg_val_loss:.6f}\n")
-            f.write(f"Accuracy: {metrics['accuracy']:.4f}\n")
-            f.write(f"Mean IoU: {metrics['mean_iou']:.4f}\n")
-            f.write(f"F1 Score: {metrics['f1_score']:.4f}\n")
-        
-        return metrics
+        plt.tight_layout()
+        plt.savefig(f"{save_dir}/training_curves.png", dpi=150, bbox_inches='tight')
+        plt.close()
 
 
 def main():
     """Main function"""
-    # Parse arguments
-    parser = argparse.ArgumentParser(description='Train and evaluate SimplifiedMRF with pre-trained CVAE')
+    parser = argparse.ArgumentParser(description='Enhanced training with multi-scale features')
     parser.add_argument('-i', '--input', help='Path of input directory', 
                       default="./input/")
     parser.add_argument('-o', '--output', help='Path of output directory',
-                      default="./output/SimplifiedMRF/")
+                      default="./output/EnhancedMRF/")
     parser.add_argument('-c', '--cvae', help='Path to pre-trained CVAE model',
                       default="./output/Enhanced-CVAE/model_best.pth")
     parser.add_argument('-w', '--window', nargs=2, type=int, default=[256, 256],
@@ -902,7 +693,6 @@ def main():
     parser.add_argument('-b', '--batch_size', default=4, type=int, help='Batch size')
     parser.add_argument('-lr', '--learning_rate', default=0.001, type=float, help='Learning rate')
     parser.add_argument('-e', '--epochs', default=30, type=int, help='Number of epochs')
-    parser.add_argument('-ld', '--latent_dim', default=512, type=int, help='CVAE latent dimension')
     parser.add_argument('-nc', '--n_classes', default=6, type=int, help='Number of classes')
     parser.add_argument('-m', '--mode', choices=['train', 'validate'], default='train',
                       help='Mode: train or validate')
@@ -912,6 +702,8 @@ def main():
                       help='Percentage of labeled data to use (10, 30, 75, 100)')
     parser.add_argument('-s', '--seed', default=42, type=int,
                       help='Random seed for reproducibility')
+    parser.add_argument('--simple_loss', action='store_true',
+                      help='Use simple cross entropy loss instead of multi-scale loss')
     args = parser.parse_args()
     
     # Set random seeds for reproducibility
@@ -922,7 +714,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Create output directory with percentage in name for experiments
+    # Create output directory
     if args.labeled_percentage < 100:
         OUTPUT_FOLDER = f"{args.output}_{args.labeled_percentage}pct_labeled"
     else:
@@ -937,7 +729,6 @@ def main():
     BATCH_SIZE = args.batch_size
     EPOCHS = args.epochs
     LEARNING_RATE = args.learning_rate
-    LATENT_DIM = args.latent_dim
     N_CLASSES = args.n_classes
     
     # Data paths
@@ -947,23 +738,18 @@ def main():
     # Define train and test IDs
     all_ids = ['1', '3', '23', '26', '7', '11', '13', '28', '17', '32', '34', '37', '5', '15', '21', '30']
     
-    # Split data (same as for CVAE)
+    # Split data
     train_val_split = int(len(all_ids) * 0.8)
     train_ids_full = all_ids[:train_val_split]
     val_ids = all_ids[train_val_split:]
     
-    # For semi-supervised experiments, use only a subset of labeled data
+    # Handle labeled percentage
     labeled_percentage = args.labeled_percentage
     if labeled_percentage < 100:
-        # Use only a subset of training data as labeled
         num_labeled = max(1, int(len(train_ids_full) * labeled_percentage / 100))
-        # Instead of sequential selection, we can shuffle for better class representation
-        # But first set the seed for reproducibility
         rng = np.random.RandomState(args.seed)
         shuffled_indices = rng.permutation(len(train_ids_full))
         labeled_indices = shuffled_indices[:num_labeled]
-        
-        # Get the actual labeled IDs
         train_ids = [train_ids_full[i] for i in labeled_indices]
         print(f"Using {len(train_ids)} images ({labeled_percentage}%) as labeled data: {train_ids}")
     else:
@@ -976,15 +762,12 @@ def main():
     if args.mode == 'train':
         train_set = SegmentationDataset(
             train_ids, IMAGE_FILES, LABEL_FILES, WINDOW_SIZE, 
-            augment=True, 
-            enable_cutmix=True,
-            cutmix_prob=0.3  # 30% chance of applying CutMix augmentation
+            augment=True, enable_cutmix=True, cutmix_prob=0.3
         )
     
     val_set = SegmentationDataset(
         val_ids, IMAGE_FILES, LABEL_FILES, WINDOW_SIZE, 
-        augment=False,
-        enable_cutmix=False
+        augment=False, enable_cutmix=False
     )
     
     # Create data loaders
@@ -1000,14 +783,12 @@ def main():
     )
     
     # Create trainer
-    # Ensure feature_dim matches the enhanced CVAE latent dimension
-    # If we've increased CVAE latent_dim to 512, make sure this matches
-    trainer = SegmentationTrainer(
+    trainer = EnhancedSegmentationTrainer(
         cvae_path=CVAE_PATH,
         n_classes=N_CLASSES,
-        feature_dim=LATENT_DIM,  # This should match the CVAE latent_dim
         learning_rate=LEARNING_RATE,
-        device=device
+        device=device,
+        use_multi_scale_loss=not args.simple_loss
     )
     
     if args.mode == 'train':
@@ -1024,28 +805,35 @@ def main():
             f.write(f"Batch size: {BATCH_SIZE}\n")
             f.write(f"Learning rate: {LEARNING_RATE}\n")
             f.write(f"Epochs: {EPOCHS}\n")
+            f.write(f"Multi-scale loss: {not args.simple_loss}\n")
             f.write(f"Random seed: {args.seed}\n")
     else:  # Validate mode
         # Load model
         checkpoint_path = args.checkpoint or f"{OUTPUT_FOLDER}/model_best.pth"
         
-        # Load weights
-        trainer.model.load_state_dict(torch.load(
-            checkpoint_path,
-            map_location=device,
-            weights_only=True
-        ))
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        trainer.model.load_state_dict(checkpoint['model_state_dict'])
         
         # Run validation
-        validate_output_dir = f"{OUTPUT_FOLDER}/validation"
-        metrics = trainer.validate(val_loader, validate_output_dir)
+        metrics = trainer.validate(val_loader)
         
-        # Save results to file for easier experiment comparison
-        with open(f"{OUTPUT_FOLDER}/result.txt", "w") as f:
+        print("Final Validation Results:")
+        print(f"  Accuracy: {metrics['accuracy']*100:.2f}%")
+        print(f"  Mean IoU: {metrics['mean_iou']*100:.2f}%")
+        print(f"  F1 Score: {metrics['f1_score']*100:.2f}%")
+        
+        # Save results to file
+        with open(f"{OUTPUT_FOLDER}/final_results.txt", "w") as f:
             f.write(f"Labeled percentage: {labeled_percentage}%\n")
             f.write(f"Accuracy -> {metrics['accuracy']*100:.2f}%\n")
             f.write(f"Mean IoU -> {metrics['mean_iou']*100:.2f}%\n")
             f.write(f"F1 Score -> {metrics['f1_score']*100:.2f}%\n")
+            
+            if 'per_class_f1' in metrics:
+                class_names = ["roads", "buildings", "low veg.", "trees", "cars", "clutter"]
+                f.write("\nPer-class F1 scores:\n")
+                for name, score in zip(class_names, metrics['per_class_f1']):
+                    f.write(f"  {name}: {score:.3f}\n")
 
 
 if __name__ == "__main__":
