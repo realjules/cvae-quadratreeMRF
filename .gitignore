@@ -25,3 +25,12 @@ __pycache__/
 input/
 output/
 .claude/
+
+# 1. Validate Implementation
+# python test_phase1_fixes.py  # Should show 4/4 tests passed
+
+# 2. Quick Training Test
+# python main.py quick_train  # Fast test with defaults
+
+# 3. Target Training (10% labeled data)
+# python main.py -m train -lp 10 -e 50  # 10% labeled, 50 epochs
