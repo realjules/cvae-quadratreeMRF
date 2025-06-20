@@ -411,18 +411,22 @@ class FixedSegmentationTrainer:
         
         print("Creating simple fallback feature extractor")
         # Create a simple CNN feature extractor as fallback
+        # This needs to match what the segmentation model expects:
+        # p1: [B, 64, 128, 128] - for process_p1(64, 128)
+        # p2: [B, 128, 64, 64] - for process_p2(128, 256)  
+        # p3: [B, 256, 32, 32] - for process_p3(256, 512)
         fallback_extractor = nn.Sequential(
-            # Level 1: 256x256 -> 128x128
+            # Level 1: 256x256 -> 128x128, 64 channels
             nn.Conv2d(3, 64, 3, stride=2, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             
-            # Level 2: 128x128 -> 64x64
+            # Level 2: 128x128 -> 64x64, 128 channels
             nn.Conv2d(64, 128, 3, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             
-            # Level 3: 64x64 -> 32x32
+            # Level 3: 64x64 -> 32x32, 256 channels
             nn.Conv2d(128, 256, 3, stride=2, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True)
@@ -468,71 +472,52 @@ class FixedSegmentationTrainer:
         FIXED: Use actual CNN fallback extractor instead of random noise
         This was the critical bug causing 55% accuracy - now uses real learned features
         """
-        # Use the fallback CNN we created in __init__
         with torch.no_grad():
-            # The fallback_extractor is a sequential CNN: 3→64→128→256
-            x = images
-            features = []
+            # Use the fallback extractor we created
+            x = images  # [B, 3, 256, 256]
             
-            # Extract intermediate features at each level
-            for i, layer in enumerate(self.cvae.children()):
-                x = layer(x)
-                features.append(x)
-                
-                # Stop after 3 levels to get multi-scale features
-                if len(features) == 3:
-                    break
+            # Extract features at each level manually
+            layers = list(self.cvae.children())
             
-            # If fallback extractor doesn't have intermediate outputs, 
-            # generate features manually using learned weights
-            if len(features) < 3:
-                x = images
-                # Use the actual fallback extractor layers
-                layers = list(self.cvae.children())
-                
-                # Level 1: First conv block
-                if len(layers) >= 3:
-                    feat_l1 = layers[0](x)  # Should be conv→bn→relu
-                    feat_l1 = layers[1](feat_l1) if len(layers) > 1 else feat_l1
-                    feat_l1 = layers[2](feat_l1) if len(layers) > 2 else feat_l1
-                else:
-                    # Manual fallback if extractor is not properly structured
-                    feat_l1 = F.conv2d(x, weight=torch.randn(64, 3, 3, 3, device=self.device, requires_grad=False), 
-                                      stride=2, padding=1)
-                    feat_l1 = F.relu(feat_l1)
-                
-                # Level 2: Continue from feat_l1
-                if len(layers) >= 6:
-                    feat_l2 = layers[3](feat_l1)
-                    feat_l2 = layers[4](feat_l2) if len(layers) > 4 else feat_l2
-                    feat_l2 = layers[5](feat_l2) if len(layers) > 5 else feat_l2
-                else:
-                    feat_l2 = F.conv2d(feat_l1, weight=torch.randn(128, 64, 3, 3, device=self.device, requires_grad=False),
-                                      stride=2, padding=1)
-                    feat_l2 = F.relu(feat_l2)
-                
-                # Level 3: Continue from feat_l2
-                if len(layers) >= 9:
-                    feat_l3 = layers[6](feat_l2)
-                    feat_l3 = layers[7](feat_l3) if len(layers) > 7 else feat_l3
-                    feat_l3 = layers[8](feat_l3) if len(layers) > 8 else feat_l3
-                else:
-                    feat_l3 = F.conv2d(feat_l2, weight=torch.randn(256, 128, 3, 3, device=self.device, requires_grad=False),
-                                      stride=2, padding=1)
-                    feat_l3 = F.relu(feat_l3)
-                
-                features = [feat_l1, feat_l2, feat_l3]
+            # Level 1: 256x256 -> 128x128, 64 channels
+            if len(layers) >= 3:
+                feat_l1 = layers[0](x)  # Conv2d
+                feat_l1 = layers[1](feat_l1)  # BatchNorm2d
+                feat_l1 = layers[2](feat_l1)  # ReLU
+            else:
+                # Manual fallback - this should not happen with our sequential model
+                feat_l1 = F.conv2d(x, weight=torch.randn(64, 3, 3, 3, device=self.device, requires_grad=False), 
+                                  stride=2, padding=1)
+                feat_l1 = F.relu(feat_l1)
             
-            # Ensure we have the right number of features
-            while len(features) < 3:
-                # Duplicate last feature if needed
-                features.append(features[-1])
+            # Level 2: 128x128 -> 64x64, 128 channels
+            if len(layers) >= 6:
+                feat_l2 = layers[3](feat_l1)  # Conv2d
+                feat_l2 = layers[4](feat_l2)  # BatchNorm2d
+                feat_l2 = layers[5](feat_l2)  # ReLU
+            else:
+                feat_l2 = F.conv2d(feat_l1, weight=torch.randn(128, 64, 3, 3, device=self.device, requires_grad=False),
+                                  stride=2, padding=1)
+                feat_l2 = F.relu(feat_l2)
+            
+            # Level 3: 64x64 -> 32x32, 256 channels
+            if len(layers) >= 9:
+                feat_l3 = layers[6](feat_l2)  # Conv2d
+                feat_l3 = layers[7](feat_l3)  # BatchNorm2d
+                feat_l3 = layers[8](feat_l3)  # ReLU
+            else:
+                feat_l3 = F.conv2d(feat_l2, weight=torch.randn(256, 128, 3, 3, device=self.device, requires_grad=False),
+                                  stride=2, padding=1)
+                feat_l3 = F.relu(feat_l3)
+            
+            # Debug: Print shapes to verify
+            print(f"  Fallback features: p1={feat_l1.shape}, p2={feat_l2.shape}, p3={feat_l3.shape}")
             
             return {
-                'p1': features[0],  # Should be [B, 64, 128, 128]
-                'p2': features[1],  # Should be [B, 128, 64, 64] 
-                'p3': features[2],  # Should be [B, 256, 32, 32]
-                'global_context': features[2]
+                'p1': feat_l1,  # [B, 64, 128, 128]
+                'p2': feat_l2,  # [B, 128, 64, 64] 
+                'p3': feat_l3,  # [B, 256, 32, 32]
+                'global_context': feat_l3
             }
     
     def train_step(self, images, labels):
