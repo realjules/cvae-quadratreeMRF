@@ -93,9 +93,14 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
             # Combine for batch processing
             combined_batch = torch.cat([view1_batch, view2_batch], dim=0)
             
-            # Train step
+            # Train step with NaN detection
             metrics = cvae_trainer.train_step_contrastive(combined_batch)
             
+            # Check for NaN and skip if detected
+            if torch.isnan(torch.tensor(metrics['total_loss'])):
+                print(f"  ⚠️  NaN detected at batch {batch_idx}, skipping...")
+                continue
+                
             epoch_loss += metrics['total_loss']
             num_batches += 1
             
@@ -103,6 +108,13 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
                 print(f"  Batch {batch_idx}: Total={metrics['total_loss']:.4f}, "
                       f"Recon={metrics['recon_loss']:.4f}, "
                       f"Contrastive={metrics['contrastive_loss']:.4f}")
+                
+                # Early stopping if loss becomes too high
+                if metrics['total_loss'] > 50.0:
+                    print(f"  ⚠️  Loss too high ({metrics['total_loss']:.2f}), reducing learning rate...")
+                    for param_group in cvae_trainer.optimizer.param_groups:
+                        param_group['lr'] *= 0.5
+                    print(f"  New learning rate: {param_group['lr']:.6f}")
         
         avg_loss = epoch_loss / max(num_batches, 1)
         print(f"📊 CVAE Epoch {epoch} completed: Average Loss = {avg_loss:.4f}")
@@ -238,35 +250,60 @@ def main():
     print(f"Segmentation Epochs: {args.epochs_seg}")
     print("=" * 60)
     
-    # Create trainers
+    # Create trainers with fixed hyperparameters
     print("🔧 Initializing trainers...")
-    cvae_trainer = CVAETrainer(device=device, learning_rate=args.learning_rate)
+    
+    # Fix 1: Lower learning rate for CVAE stability
+    cvae_lr = args.learning_rate * 0.1  # 10x lower for contrastive learning
+    seg_lr = args.learning_rate * 0.5   # 2x lower for segmentation
+    
+    cvae_trainer = CVAETrainer(
+        device=device, 
+        learning_rate=cvae_lr,
+        temperature=0.5  # Higher temperature for stability
+    )
     seg_trainer = FixedSegmentationTrainer(
         cvae_path="./nonexistent.pth",  # Will use fallback initially
-        learning_rate=args.learning_rate,
+        learning_rate=seg_lr,
         device=device
     )
     
-    # Create data generators
+    print(f"  CVAE Learning Rate: {cvae_lr}")
+    print(f"  Segmentation Learning Rate: {seg_lr}")
+    print(f"  Temperature: 0.5")
+    
+    # Create data generators with memory-efficient batch sizes
     print("📊 Creating data generators...")
+    
+    # Fix 2: Reduce batch sizes for memory efficiency
+    effective_batch_size = min(args.batch_size, 2)  # Max 2 for GPU memory
+    
     unlabeled_data = create_enhanced_dummy_dataset(
-        batch_size=args.batch_size, 
+        batch_size=effective_batch_size, 
         num_batches=30, 
         device=device, 
         mode="unlabeled"
     )
     labeled_data = create_enhanced_dummy_dataset(
-        batch_size=args.batch_size, 
+        batch_size=effective_batch_size, 
         num_batches=20, 
         device=device, 
         mode="train"
     )
     test_data = create_enhanced_dummy_dataset(
-        batch_size=args.batch_size, 
+        batch_size=effective_batch_size, 
         num_batches=10, 
         device=device, 
         mode="test"
     )
+    
+    print(f"  Effective Batch Size: {effective_batch_size} (reduced for memory)")
+    print(f"  GPU Memory Available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    
+    # Clear any existing GPU memory
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"  GPU Memory Cleared")
     
     # Training pipeline
     start_time = time.time()
@@ -274,6 +311,11 @@ def main():
     try:
         # Stage 1: CVAE Contrastive Learning
         cvae_trainer = train_cvae_stage(cvae_trainer, unlabeled_data, args.epochs_cvae, device)
+        
+        # Clear GPU memory before next stage
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print("🧹 GPU memory cleared between stages")
         
         # Update segmentation trainer with trained CVAE
         seg_trainer.cvae = cvae_trainer.cvae
