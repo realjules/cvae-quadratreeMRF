@@ -33,4 +33,4 @@ output/
 # python main.py quick_train  # Fast test with defaults
 
 # 3. Target Training (10% labeled data)
-# python main.py -m train -lp 10 -e 50  # 10% labeled, 50 epochs
+# python complete_training.py --epochs_cvae 10 --epochs_seg 15 --batch_size 2 --learning_rate 0.0001
