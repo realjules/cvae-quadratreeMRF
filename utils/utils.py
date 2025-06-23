@@ -21,7 +21,12 @@ import matplotlib.pyplot as plt
 
 def get_random_pos(img, window_shape):
     """ Extract of 2D random patch of shape window_shape in the image """
-    w, h = window_shape
+    # Handle both integer (square window) and tuple (rectangular window) inputs
+    if isinstance(window_shape, int):
+        w, h = window_shape, window_shape  # Convert int to square dimensions
+    else:
+        w, h = window_shape  # Use provided (width, height) tuple
+    
     W, H = img.shape[-2:]
     x1 = random.randint(0, W - w - 1)
     x2 = x1 + w
