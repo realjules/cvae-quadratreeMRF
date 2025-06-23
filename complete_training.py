@@ -26,58 +26,170 @@ from utils.curriculum_learning import CurriculumTrainer, create_default_curricul
 from train import FixedSegmentationTrainer
 from utils.contrastive_augmentations import ContrastiveAugmentation
 
+# Import real dataset classes
+from dataset.dataset import ISPRS_dataset
+from dataset.unsupervised_dataset import ISPRS_unsupervised_dataset
+from torch.utils.data import DataLoader
+import glob
 
-def create_enhanced_dummy_dataset(batch_size=4, num_batches=50, device="cuda", mode="train"):
+
+def get_available_area_ids():
     """
-    Enhanced dummy dataset that simulates real ISPRS data characteristics
+    Auto-detect available area IDs from ISPRS data files
+    Returns IDs that have both top images and ground truth labels
     """
-    def data_generator():
-        aug = ContrastiveAugmentation(size=256, strength=0.8)
-        
-        for i in range(num_batches):
-            # Create more realistic aerial imagery patterns
-            if mode == "unlabeled":
-                # For contrastive learning - return augmented pairs
-                base_images = torch.randn(batch_size, 3, 256, 256, device=device)
-                base_images = torch.sigmoid(base_images)  # Normalize to [0,1]
-                
-                augmented_batch = []
-                for j in range(batch_size):
-                    view1, view2 = aug(base_images[j])
-                    augmented_batch.append((view1.to(device), view2.to(device)))
-                
-                yield augmented_batch
-                
-            else:
-                # For supervised learning - return image-label pairs
-                images = torch.randn(batch_size, 3, 256, 256, device=device)
-                images = torch.sigmoid(images)
-                
-                # Create more realistic segmentation patterns
-                labels = torch.randint(0, 6, (batch_size, 256, 256), device=device)
-                
-                # Add some spatial structure (buildings, roads, etc.)
-                for b in range(batch_size):
-                    # Add rectangular "buildings"
-                    h_start, w_start = np.random.randint(50, 150, 2)
-                    h_size, w_size = np.random.randint(20, 80, 2)
-                    labels[b, h_start:h_start+h_size, w_start:w_start+w_size] = 1  # Buildings
-                    
-                    # Add linear "roads"
-                    road_y = np.random.randint(50, 200)
-                    labels[b, road_y:road_y+5, :] = 0  # Roads
-                
-                yield images, labels
+    # Get available top images
+    top_files = glob.glob("./input/top/top_mosaic_09cm_area*.tif")
+    gt_files = glob.glob("./input/gt/top_mosaic_09cm_area*.tif")
     
-    return data_generator
+    # Extract area numbers
+    top_ids = []
+    for f in top_files:
+        area_part = f.split('area')[1].split('.')[0]
+        top_ids.append(area_part)
+    
+    gt_ids = []
+    for f in gt_files:
+        area_part = f.split('area')[1].split('.')[0]
+        gt_ids.append(area_part)
+    
+    # Only use IDs that have both top and ground truth
+    valid_ids = list(set(top_ids) & set(gt_ids))
+    valid_ids = sorted(valid_ids, key=lambda x: int(x))
+    
+    print(f"Found {len(top_ids)} top images, {len(gt_ids)} ground truth images")
+    print(f"Valid IDs with both: {valid_ids}")
+    
+    return valid_ids
+
+
+def split_dataset_ids(valid_ids, labeled_percent=10):
+    """
+    Split dataset IDs into train/unlabeled/test sets
+    """
+    total_ids = len(valid_ids)
+    
+    # For semi-supervised learning:
+    # - Use only labeled_percent% for supervised training
+    # - Use ALL data for unsupervised CVAE training
+    # - Use separate set for testing
+    
+    # Test set: last 20% of data
+    test_split = max(1, int(0.2 * total_ids))
+    test_ids = valid_ids[-test_split:]
+    
+    # Remaining data for training
+    train_pool = valid_ids[:-test_split]
+    
+    # Labeled data: only a small percentage
+    labeled_count = max(1, int(labeled_percent / 100.0 * len(train_pool)))
+    labeled_ids = train_pool[:labeled_count]
+    
+    # Unlabeled data: ALL training data (including labeled) for contrastive learning
+    unlabeled_ids = train_pool
+    
+    print(f"Dataset split (total {total_ids} areas):")
+    print(f"  Labeled training: {len(labeled_ids)} areas ({labeled_ids})")
+    print(f"  Unlabeled training: {len(unlabeled_ids)} areas (for contrastive learning)")
+    print(f"  Test: {len(test_ids)} areas ({test_ids})")
+    
+    return labeled_ids, unlabeled_ids, test_ids
+
+
+def create_real_dataloaders(batch_size=2, labeled_percent=10, device="cuda"):
+    """
+    Create DataLoaders using real ISPRS dataset
+    """
+    # Get available data
+    valid_ids = get_available_area_ids()
+    if len(valid_ids) == 0:
+        raise ValueError("No valid ISPRS data found! Check ./input/top/ and ./input/gt/ directories")
+    
+    # Split dataset
+    labeled_ids, unlabeled_ids, test_ids = split_dataset_ids(valid_ids, labeled_percent)
+    
+    # Create datasets
+    print("Creating real ISPRS datasets...")
+    
+    # Unlabeled dataset for CVAE contrastive learning
+    unlabeled_dataset = ISPRS_unsupervised_dataset(
+        ids=unlabeled_ids,
+        data_files="./input/top/top_mosaic_09cm_area{}.tif",
+        window_size=256,
+        cache=False,  # Disable cache for Kaggle memory constraints
+        augmentation=True
+    )
+    
+    # Labeled dataset for segmentation training
+    labeled_dataset = ISPRS_dataset(
+        ids=labeled_ids,
+        ids_type='TRAIN',
+        gt_type='full',
+        gt_modification=None,
+        data_files="./input/top/top_mosaic_09cm_area{}.tif",
+        label_files="./input/gt/top_mosaic_09cm_area{}.tif",
+        window_size=256,
+        cache=False,
+        augmentation=True
+    )
+    
+    # Test dataset
+    test_dataset = ISPRS_dataset(
+        ids=test_ids,
+        ids_type='TEST',
+        gt_type='full',
+        gt_modification=None,
+        data_files="./input/top/top_mosaic_09cm_area{}.tif",
+        label_files="./input/gt/top_mosaic_09cm_area{}.tif",
+        window_size=256,
+        cache=False,
+        augmentation=False
+    )
+    
+    # Create DataLoaders with Kaggle-optimized settings
+    unlabeled_loader = DataLoader(
+        unlabeled_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,  # Avoid multiprocessing issues in Kaggle
+        pin_memory=False,  # Save memory
+        drop_last=True
+    )
+    
+    labeled_loader = DataLoader(
+        labeled_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=False,
+        drop_last=True
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+        drop_last=False
+    )
+    
+    print(f"✅ Real ISPRS DataLoaders created successfully!")
+    print(f"   Unlabeled: {len(unlabeled_dataset)} samples")
+    print(f"   Labeled: {len(labeled_dataset)} samples")
+    print(f"   Test: {len(test_dataset)} samples")
+    
+    return unlabeled_loader, labeled_loader, test_loader
 
 
 def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda"):
     """
-    Stage 1: Train CVAE with contrastive learning on unlabeled data
+    Stage 1: Train CVAE with contrastive learning on unlabeled ISPRS data
     """
-    print("🎯 STAGE 1: CVAE Contrastive Learning")
+    print("🎯 STAGE 1: CVAE Contrastive Learning (Real ISPRS Data)")
     print("=" * 50)
+    
+    aug = ContrastiveAugmentation(size=256, strength=0.8)
     
     for epoch in range(1, epochs + 1):
         epoch_loss = 0
@@ -85,7 +197,14 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
         
         print(f"\n📚 CVAE Epoch {epoch}/{epochs}")
         
-        for batch_idx, augmented_pairs in enumerate(unlabeled_dataloader()):
+        # Use real DataLoader instead of generator function
+        for batch_idx, (images, _) in enumerate(unlabeled_dataloader):
+            # Create contrastive pairs from real ISPRS images
+            augmented_pairs = []
+            for i in range(images.size(0)):
+                view1, view2 = aug(images[i])
+                augmented_pairs.append((view1.to(device), view2.to(device)))
+            
             # Extract views from augmented pairs
             view1_batch = torch.stack([pair[0] for pair in augmented_pairs])
             view2_batch = torch.stack([pair[1] for pair in augmented_pairs])
@@ -115,6 +234,10 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
                     for param_group in cvae_trainer.optimizer.param_groups:
                         param_group['lr'] *= 0.5
                     print(f"  New learning rate: {param_group['lr']:.6f}")
+            
+            # Limit batches per epoch for faster iteration
+            if batch_idx >= 100:  # Process max 100 batches per epoch
+                break
         
         avg_loss = epoch_loss / max(num_batches, 1)
         print(f"📊 CVAE Epoch {epoch} completed: Average Loss = {avg_loss:.4f}")
@@ -129,9 +252,9 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
 
 def train_segmentation_stage(seg_trainer, labeled_dataloader, epochs=30, device="cuda"):
     """
-    Stage 2: Train segmentation model with curriculum learning
+    Stage 2: Train segmentation model on labeled ISPRS data
     """
-    print("\n🎯 STAGE 2: Semi-Supervised Segmentation Training")
+    print("\n🎯 STAGE 2: Semi-Supervised Segmentation Training (Real ISPRS Data)")
     print("=" * 50)
     
     best_loss = float('inf')
@@ -142,7 +265,12 @@ def train_segmentation_stage(seg_trainer, labeled_dataloader, epochs=30, device=
         
         print(f"\n📚 Segmentation Epoch {epoch}/{epochs}")
         
-        for batch_idx, (images, labels) in enumerate(labeled_dataloader()):
+        # Use real DataLoader instead of generator function
+        for batch_idx, (images, labels) in enumerate(labeled_dataloader):
+            # Move to device
+            images = images.to(device)
+            labels = labels.to(device)
+            
             # Training step
             loss, loss_components, outputs = seg_trainer.train_step(images, labels)
             
@@ -157,6 +285,10 @@ def train_segmentation_stage(seg_trainer, labeled_dataloader, epochs=30, device=
                 pred_classes = torch.argmax(final_seg, dim=1)
                 accuracy = (pred_classes == labels).float().mean()
                 print(f"    Batch Accuracy: {accuracy:.3f}")
+            
+            # Limit batches per epoch for faster iteration
+            if batch_idx >= 50:  # Process max 50 batches per epoch
+                break
         
         avg_loss = epoch_loss / max(num_batches, 1)
         print(f"📊 Segmentation Epoch {epoch} completed: Average Loss = {avg_loss:.4f}")
@@ -173,10 +305,10 @@ def train_segmentation_stage(seg_trainer, labeled_dataloader, epochs=30, device=
 
 def evaluate_model(seg_trainer, test_dataloader, device="cuda"):
     """
-    Evaluate the trained model
+    Evaluate the trained model on real ISPRS test data
     """
-    print("\n🧪 EVALUATION")
-    print("=" * 30)
+    print("\n🧪 EVALUATION (Real ISPRS Test Data)")
+    print("=" * 40)
     
     seg_trainer.model.eval()
     total_accuracy = 0
@@ -185,7 +317,11 @@ def evaluate_model(seg_trainer, test_dataloader, device="cuda"):
     class_total = [0] * 6
     
     with torch.no_grad():
-        for batch_idx, (images, labels) in enumerate(test_dataloader()):
+        for batch_idx, (images, labels) in enumerate(test_dataloader):
+            # Move to device
+            images = images.to(device)
+            labels = labels.to(device)
+            
             # Extract features and predict
             features = seg_trainer.extract_cvae_features(images)
             outputs = seg_trainer.model(features)
@@ -204,10 +340,14 @@ def evaluate_model(seg_trainer, test_dataloader, device="cuda"):
                 if class_mask.sum() > 0:
                     class_correct[c] += (pred_classes[class_mask] == c).float().sum()
                     class_total[c] += class_mask.sum()
+            
+            # Limit evaluation batches for faster testing
+            if batch_idx >= 20:  # Evaluate on 20 batches
+                break
     
     overall_accuracy = (total_accuracy / total_samples * 100).item()
     
-    print(f"📊 EVALUATION RESULTS:")
+    print(f"📊 EVALUATION RESULTS (Real ISPRS Data):")
     print(f"Overall Accuracy: {overall_accuracy:.2f}%")
     print(f"Class-wise Accuracy:")
     class_names = ["Impervious", "Buildings", "Low Veg", "Trees", "Cars", "Clutter"]
@@ -272,30 +412,22 @@ def main():
     print(f"  Segmentation Learning Rate: {seg_lr}")
     print(f"  Temperature: 0.5")
     
-    # Create data generators with memory-efficient batch sizes
-    print("📊 Creating data generators...")
+    # Create real ISPRS data loaders
+    print("📊 Creating real ISPRS data loaders...")
     
     # Fix 2: Reduce batch sizes for memory efficiency
     effective_batch_size = min(args.batch_size, 2)  # Max 2 for GPU memory
     
-    unlabeled_data = create_enhanced_dummy_dataset(
-        batch_size=effective_batch_size, 
-        num_batches=30, 
-        device=device, 
-        mode="unlabeled"
-    )
-    labeled_data = create_enhanced_dummy_dataset(
-        batch_size=effective_batch_size, 
-        num_batches=20, 
-        device=device, 
-        mode="train"
-    )
-    test_data = create_enhanced_dummy_dataset(
-        batch_size=effective_batch_size, 
-        num_batches=10, 
-        device=device, 
-        mode="test"
-    )
+    try:
+        unlabeled_loader, labeled_loader, test_loader = create_real_dataloaders(
+            batch_size=effective_batch_size,
+            labeled_percent=args.labeled_percent,
+            device=device
+        )
+    except Exception as e:
+        print(f"❌ Failed to create real data loaders: {e}")
+        print("Please ensure ISPRS data is properly linked in ./input/ directories")
+        return 1
     
     print(f"  Effective Batch Size: {effective_batch_size} (reduced for memory)")
     print(f"  GPU Memory Available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
@@ -309,8 +441,8 @@ def main():
     start_time = time.time()
     
     try:
-        # Stage 1: CVAE Contrastive Learning
-        cvae_trainer = train_cvae_stage(cvae_trainer, unlabeled_data, args.epochs_cvae, device)
+        # Stage 1: CVAE Contrastive Learning on real ISPRS data
+        cvae_trainer = train_cvae_stage(cvae_trainer, unlabeled_loader, args.epochs_cvae, device)
         
         # Clear GPU memory before next stage
         if torch.cuda.is_available():
@@ -320,11 +452,11 @@ def main():
         # Update segmentation trainer with trained CVAE
         seg_trainer.cvae = cvae_trainer.cvae
         
-        # Stage 2: Segmentation Training
-        seg_trainer = train_segmentation_stage(seg_trainer, labeled_data, args.epochs_seg, device)
+        # Stage 2: Segmentation Training on labeled ISPRS data
+        seg_trainer = train_segmentation_stage(seg_trainer, labeled_loader, args.epochs_seg, device)
         
-        # Stage 3: Evaluation
-        final_accuracy = evaluate_model(seg_trainer, test_data, device)
+        # Stage 3: Evaluation on real ISPRS test data
+        final_accuracy = evaluate_model(seg_trainer, test_loader, device)
         
         # Results
         total_time = time.time() - start_time
