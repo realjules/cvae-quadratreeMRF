@@ -151,6 +151,15 @@ class BoundaryLoss(nn.Module):
         super(BoundaryLoss, self).__init__()
         
     def forward(self, predictions, targets):
+        # Ensure predictions and targets have same spatial size
+        if predictions.size(2) != targets.size(1) or predictions.size(3) != targets.size(2):
+            predictions = F.interpolate(
+                predictions, 
+                size=(targets.size(1), targets.size(2)), 
+                mode='bilinear', 
+                align_corners=False
+            )
+        
         # Convert predictions to class predictions
         pred_classes = torch.argmax(predictions, dim=1)
         
