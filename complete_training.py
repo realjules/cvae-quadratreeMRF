@@ -283,6 +283,15 @@ def train_segmentation_stage(seg_trainer, labeled_dataloader, epochs=30, device=
                 # Check output quality
                 final_seg = outputs['final_segmentation']
                 pred_classes = torch.argmax(final_seg, dim=1)
+                
+                # Resize pred_classes to match labels if needed
+                if pred_classes.shape != labels.shape:
+                    pred_classes = torch.nn.functional.interpolate(
+                        pred_classes.unsqueeze(1).float(), 
+                        size=labels.shape[1:], 
+                        mode='nearest'
+                    ).squeeze(1).long()
+                
                 accuracy = (pred_classes == labels).float().mean()
                 print(f"    Batch Accuracy: {accuracy:.3f}")
             
