@@ -338,6 +338,14 @@ def evaluate_model(seg_trainer, test_dataloader, device="cuda"):
             final_seg = outputs['final_segmentation']
             pred_classes = torch.argmax(final_seg, dim=1)
             
+            # Resize pred_classes to match labels if needed
+            if pred_classes.shape != labels.shape:
+                pred_classes = torch.nn.functional.interpolate(
+                    pred_classes.unsqueeze(1).float(), 
+                    size=labels.shape[1:], 
+                    mode='nearest'
+                ).squeeze(1).long()
+            
             # Overall accuracy
             correct = (pred_classes == labels).float().sum()
             total_accuracy += correct
