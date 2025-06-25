@@ -239,9 +239,7 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
                         param_group['lr'] *= 0.5
                     print(f"  New learning rate: {param_group['lr']:.6f}")
             
-            # Limit batches per epoch for faster iteration
-            if batch_idx >= 100:  # Process max 100 batches per epoch
-                break
+            
         
         avg_loss = epoch_loss / max(num_batches, 1)
         avg_contrastive_loss = epoch_contrastive_loss / max(num_batches, 1)
@@ -312,9 +310,7 @@ def train_segmentation_stage(seg_trainer, labeled_dataloader, epochs=30, device=
                 accuracy = (pred_classes == labels).float().mean()
                 print(f"    Batch Accuracy: {accuracy:.3f}")
             
-            # Limit batches per epoch for faster iteration
-            if batch_idx >= 50:  # Process max 50 batches per epoch
-                break
+            
         
         avg_loss = epoch_loss / max(num_batches, 1)
         print(f"📊 Segmentation Epoch {epoch} completed: Average Loss = {avg_loss:.4f}")
@@ -375,9 +371,7 @@ def evaluate_model(seg_trainer, test_dataloader, device="cuda"):
                     class_correct[c] += (pred_classes[class_mask] == c).float().sum()
                     class_total[c] += class_mask.sum()
             
-            # Limit evaluation batches for faster testing
-            if batch_idx >= 20:  # Evaluate on 20 batches
-                break
+            
     
     overall_accuracy = (total_accuracy / total_samples * 100).item()
     

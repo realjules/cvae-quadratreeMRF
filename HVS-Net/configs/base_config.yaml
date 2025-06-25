@@ -1,0 +1,39 @@
+# HVS-Net/configs/base_config.yaml
+
+"""
+This YAML file will hold all the hyperparameters and configuration settings for our experiments.
+This allows us to easily track and modify settings without changing the code.
+
+Example settings:
+- Learning rate
+- Batch size
+- Loss weights (for combining the three loss components)
+- Model dimensions (latent_dim, etc.)
+- Data paths
+"""
+
+# Data settings
+data:
+  train_dir: '../input/top/'
+  label_dir: '../input/gt/'
+  labeled_percentage: 10
+
+# Model settings
+model:
+  n_channels: 3
+  n_classes: 6
+  latent_dim: 256
+
+# Training settings
+training:
+  epochs: 100
+  batch_size: 4
+  learning_rate: 0.001
+  optimizer: 'AdamW'
+  scheduler: 'CosineAnnealingLR'
+
+# Loss settings
+loss:
+  supervised_weight: 1.0
+  reconstruction_weight: 0.5
+  consistency_weight: 1.0
