@@ -193,6 +193,8 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
     
     for epoch in range(1, epochs + 1):
         epoch_loss = 0
+        epoch_contrastive_loss = 0
+        epoch_recon_loss = 0
         num_batches = 0
         
         print(f"\n📚 CVAE Epoch {epoch}/{epochs}")
@@ -221,6 +223,8 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
                 continue
                 
             epoch_loss += metrics['total_loss']
+            epoch_contrastive_loss += metrics['contrastive_loss']
+            epoch_recon_loss += metrics['recon_loss']
             num_batches += 1
             
             if batch_idx % 10 == 0:
@@ -240,10 +244,23 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
                 break
         
         avg_loss = epoch_loss / max(num_batches, 1)
+        avg_contrastive_loss = epoch_contrastive_loss / max(num_batches, 1)
+        avg_recon_loss = epoch_recon_loss / max(num_batches, 1)
+        
         print(f"📊 CVAE Epoch {epoch} completed: Average Loss = {avg_loss:.4f}")
         
-        # Save checkpoint
-        if epoch % 5 == 0:
+        # Create epoch metrics for best model tracking
+        epoch_metrics = {
+            'total_loss': avg_loss,
+            'contrastive_loss': avg_contrastive_loss,
+            'recon_loss': avg_recon_loss
+        }
+        
+        # Save best model if improved
+        cvae_trainer.save_best_if_improved(epoch_metrics, epoch)
+        
+        # Periodic checkpoint saving (every 20 epochs instead of 5)
+        if epoch % 20 == 0:
             cvae_trainer.save_model(f"./output/cvae_epoch_{epoch}.pth", epoch)
     
     print("✅ CVAE contrastive learning completed!")
@@ -420,7 +437,7 @@ def main():
         temperature=0.5  # Higher temperature for stability
     )
     seg_trainer = FixedSegmentationTrainer(
-        cvae_path="./nonexistent.pth",  # Will use fallback initially
+        cvae_path="./output/cvae_best.pth",  # Use best CVAE model
         learning_rate=seg_lr,
         device=device
     )

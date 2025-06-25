@@ -75,6 +75,10 @@ class CVAETrainer:
             'total_loss': []
         }
         
+        # Best model tracking
+        self.best_contrastive_loss = float('inf')
+        self.best_model_path = "./output/cvae_best.pth"
+        
     def train_step_contrastive(self, batch_images):
         """
         Training step focused on contrastive learning (unsupervised)
@@ -287,6 +291,17 @@ class CVAETrainer:
             
         torch.save(checkpoint, path)
         print(f"✅ CVAE model saved to {path}")
+    
+    def save_best_if_improved(self, current_metrics, epoch):
+        """Save model if contrastive loss improved"""
+        current_contrastive_loss = current_metrics['contrastive_loss']
+        
+        if current_contrastive_loss < self.best_contrastive_loss:
+            self.best_contrastive_loss = current_contrastive_loss
+            self.save_model(self.best_model_path, epoch, current_metrics)
+            print(f"🏆 New best CVAE model! Contrastive loss: {current_contrastive_loss:.4f}")
+            return True
+        return False
     
     def load_model(self, path):
         """Load CVAE model and training state"""

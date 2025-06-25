@@ -397,19 +397,29 @@ class FixedSegmentationTrainer:
         }).to(self.device)
     
     def _load_or_create_cvae(self, model_path):
-        """Load CVAE or create a simple fallback feature extractor"""
-        if os.path.exists(model_path):
-            try:
-                cvae = EnhancedCVAE(input_channels=3, latent_dim=256, hidden_dims=[64, 128, 256])
-                cvae.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True), strict=False)
-                cvae = cvae.to(self.device)
-                cvae.eval()
-                print("CVAE model loaded successfully")
-                return cvae
-            except Exception as e:
-                print(f"Error loading CVAE: {e}")
+        """Load CVAE with robust fallback chain"""
+        # Try multiple model paths in order of preference
+        fallback_paths = [
+            model_path,  # Primary path (./output/cvae_best.pth)
+            "./output/cvae_epoch_60.pth",  # Last epoch from training
+            "./output/cvae_epoch_40.pth",  # Second to last checkpoint
+            "./output/cvae_epoch_20.pth"   # Earlier checkpoint
+        ]
         
-        print("Creating simple fallback feature extractor")
+        for path in fallback_paths:
+            if os.path.exists(path):
+                try:
+                    cvae = EnhancedCVAE(input_channels=3, latent_dim=256, hidden_dims=[64, 128, 256])
+                    cvae.load_state_dict(torch.load(path, map_location=self.device, weights_only=True), strict=False)
+                    cvae = cvae.to(self.device)
+                    cvae.eval()
+                    print(f"✅ CVAE model loaded successfully from {path}")
+                    return cvae
+                except Exception as e:
+                    print(f"❌ Failed to load CVAE from {path}: {e}")
+                    continue
+        
+        print("⚠️  No valid CVAE model found, creating simple fallback feature extractor")
         # Create a simple CNN feature extractor as fallback
         # This needs to match what the segmentation model expects:
         # p1: [B, 64, 128, 128] - for process_p1(64, 128)
