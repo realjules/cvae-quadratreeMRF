@@ -31,8 +31,9 @@ class ISPRS_unsupervised_dataset(torch.utils.data.Dataset):
         self.data_cache_ = {}
     
     def __len__(self):
-        # Default epoch size is 10 000 samples
-        return 10000
+        # Reasonable epoch size for faster training (was 10,000)
+        # Use smaller epoch size to prevent extremely long training times  
+        return min(2000, len(self.data_files) * 200)
     
     @classmethod
     def data_augmentation(cls, *arrays, flip=True, mirror=True):

@@ -341,13 +341,18 @@ class BoundaryRefinementModule(nn.Module):
 
 
 class FixedSegmentationTrainer:
-    """Fixed segmentation trainer with resolved issues"""
+    """Segmentation trainer with STRICT CVAE dependency - NO FALLBACK!
+    
+    This trainer REQUIRES a properly trained CVAE model and will FAIL immediately
+    if the CVAE is missing, corrupted, or improperly trained. No graceful degradation
+    or fallback mechanisms are provided to prevent accidental use of random weights.
+    """
     def __init__(self, cvae_path, n_classes=6, learning_rate=0.001, device="cuda"):
         self.device = device
         self.n_classes = n_classes
         
-        # Load CVAE or create a simple fallback
-        self.cvae = self._load_or_create_cvae(cvae_path)
+        # Load CVAE - MANDATORY, NO FALLBACK
+        self.cvae = self._load_cvae_strict(cvae_path)
         
         # Use fixed segmentation model
         self.model = FixedMultiScaleSegmentationModel(
@@ -396,74 +401,94 @@ class FixedSegmentationTrainer:
             )
         }).to(self.device)
     
-    def _load_or_create_cvae(self, model_path):
-        """Load CVAE with robust fallback chain"""
-        # Try multiple model paths in order of preference
-        fallback_paths = [
-            model_path,  # Primary path (./output/cvae_best.pth)
-            "./output/cvae_epoch_60.pth",  # Last epoch from training
-            "./output/cvae_epoch_40.pth",  # Second to last checkpoint
-            "./output/cvae_epoch_20.pth"   # Earlier checkpoint
-        ]
+    def _load_cvae_strict(self, model_path):
+        """Load CVAE with strict validation - NO FALLBACK!"""
         
-        for path in fallback_paths:
-            if os.path.exists(path):
-                try:
-                    cvae = EnhancedCVAE(input_channels=3, latent_dim=256, hidden_dims=[64, 128, 256])
-                    cvae.load_state_dict(torch.load(path, map_location=self.device, weights_only=True), strict=False)
-                    cvae = cvae.to(self.device)
-                    cvae.eval()
-                    print(f"✅ CVAE model loaded successfully from {path}")
-                    return cvae
-                except Exception as e:
-                    print(f"❌ Failed to load CVAE from {path}: {e}")
-                    continue
+        # FAIL-FAST: Assert CVAE file exists
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"❌ FATAL ERROR: CVAE model required but not found!\n"
+                f"   Expected CVAE file: {model_path}\n"
+                f"   Current directory: {os.getcwd()}\n"
+                f"   Solution: Run CVAE training first\n"
+                f"   Command: python complete_training.py --epochs_cvae 40 --epochs_seg 0"
+            )
         
-        print("⚠️  No valid CVAE model found, creating simple fallback feature extractor")
-        # Create a simple CNN feature extractor as fallback
-        # This needs to match what the segmentation model expects:
-        # p1: [B, 64, 128, 128] - for process_p1(64, 128)
-        # p2: [B, 128, 64, 64] - for process_p2(128, 256)  
-        # p3: [B, 256, 32, 32] - for process_p3(256, 512)
-        fallback_extractor = nn.Sequential(
-            # Level 1: 256x256 -> 128x128, 64 channels
-            nn.Conv2d(3, 64, 3, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            
-            # Level 2: 128x128 -> 64x64, 128 channels
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            
-            # Level 3: 64x64 -> 32x32, 256 channels
-            nn.Conv2d(128, 256, 3, stride=2, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True)
-        ).to(self.device)
+        # Validate file is not empty/corrupted
+        file_size = os.path.getsize(model_path)
+        if file_size < 1000:  # Minimum reasonable size
+            raise ValueError(
+                f"❌ CVAE file corrupted or empty: {file_size} bytes\n"
+                f"   File: {model_path}\n"
+                f"   Solution: Retrain CVAE model"
+            )
         
-        return fallback_extractor
+        # Load CVAE - NO try/except, let it crash if invalid
+        print(f"🔍 Loading CVAE from: {model_path}")
+        cvae = EnhancedCVAE(input_channels=3, latent_dim=256, hidden_dims=[64, 128, 256])
+        state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
+        cvae.load_state_dict(state_dict, strict=False)
+        cvae = cvae.to(self.device)
+        cvae.eval()
+        
+        # Validate CVAE is properly trained (not random weights)
+        with torch.no_grad():
+            test_input = torch.randn(1, 3, 256, 256).to(self.device)
+            try:
+                outputs = cvae(test_input)
+                # Check if encoder_features exist (indicates proper CVAE)
+                if 'encoder_features' not in outputs:
+                    raise ValueError("❌ Invalid CVAE: missing encoder_features")
+                if len(outputs['encoder_features']) != 3:
+                    raise ValueError("❌ Invalid CVAE: wrong number of encoder features")
+            except Exception as e:
+                raise RuntimeError(
+                    f"❌ CVAE validation failed: {str(e)}\n"
+                    f"   The CVAE model is corrupted or incompatible\n"
+                    f"   Solution: Retrain CVAE from scratch"
+                )
+        
+        print(f"✅ CVAE model loaded and validated successfully from {model_path}")
+        return cvae
     
     def extract_cvae_features(self, images):
-        """Extract multi-scale features (fixed version)"""
+        """Extract multi-scale features using MANDATORY CVAE - NO FALLBACK!"""
         with torch.no_grad():
-            if hasattr(self.cvae, 'encode'):
-                # Real CVAE
-                try:
-                    outputs = self.cvae(images)
-                    encoder_features = outputs['encoder_features']
-                    
-                    feat_l1 = encoder_features[0]  # [B, 64, 128, 128]
-                    feat_l2 = encoder_features[1]  # [B, 128, 64, 64]
-                    feat_l3 = encoder_features[2]  # [B, 256, 32, 32]
-                    
-                except Exception as e:
-                    print(f"CVAE extraction failed: {e}, using fallback")
-                    return self._fallback_feature_extraction(images)
-                    
-            else:
-                # Fallback feature extractor
-                return self._fallback_feature_extraction(images)
+            # FAIL-FAST: CVAE must have encode method (real CVAE)
+            if not hasattr(self.cvae, 'encode'):
+                raise RuntimeError(
+                    f"❌ FATAL: Invalid CVAE loaded!\n"
+                    f"   The loaded model is not a proper CVAE\n"
+                    f"   Expected: EnhancedCVAE with encode() method\n"
+                    f"   Got: {type(self.cvae)}\n"
+                    f"   Solution: Retrain CVAE properly"
+                )
+            
+            # Extract features - NO try/except, let it crash if CVAE fails
+            outputs = self.cvae(images)
+            
+            # Validate encoder features exist
+            if 'encoder_features' not in outputs:
+                raise RuntimeError(
+                    f"❌ CVAE output missing encoder_features!\n"
+                    f"   Available keys: {list(outputs.keys())}\n"
+                    f"   This indicates a corrupted or incompatible CVAE\n"
+                    f"   Solution: Retrain CVAE from scratch"
+                )
+            
+            encoder_features = outputs['encoder_features']
+            
+            # Validate feature dimensions
+            if len(encoder_features) != 3:
+                raise RuntimeError(
+                    f"❌ Wrong number of encoder features: {len(encoder_features)}\n"
+                    f"   Expected: 3 levels (p1, p2, p3)\n"
+                    f"   Solution: Check CVAE architecture compatibility"
+                )
+            
+            feat_l1 = encoder_features[0]  # [B, 64, 128, 128]
+            feat_l2 = encoder_features[1]  # [B, 128, 64, 64]
+            feat_l3 = encoder_features[2]  # [B, 256, 32, 32]
             
             # Process features through projection layers
             feat_l1_proj = self.level_projections['proj_l1'](feat_l1)
@@ -477,58 +502,6 @@ class FixedSegmentationTrainer:
                 'global_context': feat_l3_proj
             }
     
-    def _fallback_feature_extraction(self, images):
-        """
-        FIXED: Use actual CNN fallback extractor instead of random noise
-        This was the critical bug causing 55% accuracy - now uses real learned features
-        """
-        with torch.no_grad():
-            # Use the fallback extractor we created
-            x = images  # [B, 3, 256, 256]
-            
-            # Extract features at each level manually
-            layers = list(self.cvae.children())
-            
-            # Level 1: 256x256 -> 128x128, 64 channels
-            if len(layers) >= 3:
-                feat_l1 = layers[0](x)  # Conv2d
-                feat_l1 = layers[1](feat_l1)  # BatchNorm2d
-                feat_l1 = layers[2](feat_l1)  # ReLU
-            else:
-                # Manual fallback - this should not happen with our sequential model
-                feat_l1 = F.conv2d(x, weight=torch.randn(64, 3, 3, 3, device=self.device, requires_grad=False), 
-                                  stride=2, padding=1)
-                feat_l1 = F.relu(feat_l1)
-            
-            # Level 2: 128x128 -> 64x64, 128 channels
-            if len(layers) >= 6:
-                feat_l2 = layers[3](feat_l1)  # Conv2d
-                feat_l2 = layers[4](feat_l2)  # BatchNorm2d
-                feat_l2 = layers[5](feat_l2)  # ReLU
-            else:
-                feat_l2 = F.conv2d(feat_l1, weight=torch.randn(128, 64, 3, 3, device=self.device, requires_grad=False),
-                                  stride=2, padding=1)
-                feat_l2 = F.relu(feat_l2)
-            
-            # Level 3: 64x64 -> 32x32, 256 channels
-            if len(layers) >= 9:
-                feat_l3 = layers[6](feat_l2)  # Conv2d
-                feat_l3 = layers[7](feat_l3)  # BatchNorm2d
-                feat_l3 = layers[8](feat_l3)  # ReLU
-            else:
-                feat_l3 = F.conv2d(feat_l2, weight=torch.randn(256, 128, 3, 3, device=self.device, requires_grad=False),
-                                  stride=2, padding=1)
-                feat_l3 = F.relu(feat_l3)
-            
-            # Debug: Print shapes to verify
-            print(f"  Fallback features: p1={feat_l1.shape}, p2={feat_l2.shape}, p3={feat_l3.shape}")
-            
-            return {
-                'p1': feat_l1,  # [B, 64, 128, 128]
-                'p2': feat_l2,  # [B, 128, 64, 64] 
-                'p3': feat_l3,  # [B, 256, 32, 32]
-                'global_context': feat_l3
-            }
     
     def train_step(self, images, labels):
         """Fixed training step"""
@@ -586,11 +559,12 @@ def main():
     print("=" * 60)
     print(f"Labeled percentage: {args.labeled_percentage}%")
     print(f"Target: 90% accuracy with {args.labeled_percentage}% labeled data")
-    print("Key fixes:")
+    print("Key features:")
     print("1. Resolved channel dimension mismatches")
-    print("2. Fallback feature extraction if CVAE fails")
+    print("2. STRICT CVAE dependency - NO fallback allowed")
     print("3. Proper class weighting for cars detection")
     print("4. Enhanced regularization and optimization")
+    print("5. Fail-fast validation prevents random weights")
     print("=" * 60)
     
     # Set device

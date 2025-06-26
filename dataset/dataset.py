@@ -70,8 +70,9 @@ class ISPRS_dataset(torch.utils.data.Dataset):
             
     
     def __len__(self):
-        # Default epoch size is 10 000 samples
-        return 10000
+        # Reasonable epoch size for faster training (was 10,000)
+        # Use smaller epoch size to prevent extremely long training times
+        return min(2000, len(self.data_files) * 200)
     
     def __getitem__(self, i):
         # Pick a random image

@@ -19,6 +19,7 @@ import os
 import time
 import numpy as np
 from tqdm import tqdm
+from datetime import datetime, timedelta
 
 # Import our fixed components
 from utils.cvae_trainer import CVAETrainer
@@ -191,6 +192,10 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
     
     aug = ContrastiveAugmentation(size=256, strength=0.8)
     
+    # Smart batch limiting to prevent infinite training
+    max_batches_per_epoch = min(200, len(unlabeled_dataloader))
+    print(f"   Processing {max_batches_per_epoch} batches per epoch (dataset has {len(unlabeled_dataloader)} total)")
+    
     for epoch in range(1, epochs + 1):
         epoch_loss = 0
         epoch_contrastive_loss = 0
@@ -198,20 +203,31 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
         num_batches = 0
         
         print(f"\n📚 CVAE Epoch {epoch}/{epochs}")
+        epoch_start_time = time.time()
         
-        # Use real DataLoader instead of generator function
+        # Use real DataLoader with smart limiting
         for batch_idx, (images, _) in enumerate(unlabeled_dataloader):
-            # Create contrastive pairs from real ISPRS images
-            augmented_pairs = []
+            # SMART BATCH LIMITING: Prevent infinite training
+            if batch_idx >= max_batches_per_epoch:
+                print(f"   ✂️ Batch limit reached ({max_batches_per_epoch}), moving to next epoch")
+                break
+            # Optimized contrastive augmentation - process batch directly
+            images = images.to(device)
+            
+            # Create two augmented views efficiently
+            view1_batch = []
+            view2_batch = []
+            
             for i in range(images.size(0)):
                 view1, view2 = aug(images[i])
-                augmented_pairs.append((view1.to(device), view2.to(device)))
+                view1_batch.append(view1)
+                view2_batch.append(view2)
             
-            # Extract views from augmented pairs
-            view1_batch = torch.stack([pair[0] for pair in augmented_pairs])
-            view2_batch = torch.stack([pair[1] for pair in augmented_pairs])
+            # Stack views efficiently
+            view1_batch = torch.stack(view1_batch, dim=0).to(device)
+            view2_batch = torch.stack(view2_batch, dim=0).to(device)
             
-            # Combine for batch processing
+            # Process both views together for efficiency
             combined_batch = torch.cat([view1_batch, view2_batch], dim=0)
             
             # Train step with NaN detection
@@ -228,9 +244,16 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
             num_batches += 1
             
             if batch_idx % 10 == 0:
-                print(f"  Batch {batch_idx}: Total={metrics['total_loss']:.4f}, "
+                # Calculate progress and time estimates
+                progress = (batch_idx + 1) / max_batches_per_epoch
+                elapsed_time = time.time() - epoch_start_time
+                eta_epoch = elapsed_time / progress if progress > 0 else 0
+                
+                print(f"  Batch {batch_idx+1}/{max_batches_per_epoch} ({progress*100:.1f}%) - "
+                      f"Total={metrics['total_loss']:.4f}, "
                       f"Recon={metrics['recon_loss']:.4f}, "
-                      f"Contrastive={metrics['contrastive_loss']:.4f}")
+                      f"Contrastive={metrics['contrastive_loss']:.4f} - "
+                      f"ETA: {eta_epoch-elapsed_time:.0f}s")
                 
                 # Early stopping if loss becomes too high
                 if metrics['total_loss'] > 50.0:
@@ -254,12 +277,27 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
             'recon_loss': avg_recon_loss
         }
         
-        # Save best model if improved
-        cvae_trainer.save_best_if_improved(epoch_metrics, epoch)
+        # Save best model if improved (based on contrastive loss)
+        saved_best = cvae_trainer.save_best_if_improved(epoch_metrics, epoch)
         
-        # Periodic checkpoint saving (every 20 epochs instead of 5)
-        if epoch % 20 == 0:
+        # Additional saving strategies to ensure we don't lose good models
+        
+        # Strategy 1: Periodic checkpoint saving (every 5 epochs)
+        if epoch % 5 == 0:
             cvae_trainer.save_model(f"./output/cvae_epoch_{epoch}.pth", epoch)
+            print(f"💾 Periodic checkpoint saved: epoch {epoch}")
+        
+        # Strategy 2: Save if contrastive loss is reasonably good (backup criterion)
+        if avg_contrastive_loss < 2.0 and not saved_best:  # Reasonable contrastive loss threshold
+            backup_path = f"./output/cvae_backup_epoch_{epoch}.pth"
+            cvae_trainer.save_model(backup_path, epoch)
+            print(f"💾 Backup model saved (good contrastive loss): {backup_path}")
+        
+        # Strategy 3: Always save the final epoch
+        if epoch == epochs:
+            final_path = "./output/cvae_final.pth"
+            cvae_trainer.save_model(final_path, epoch)
+            print(f"💾 Final model saved: {final_path}")
     
     print("✅ CVAE contrastive learning completed!")
     return cvae_trainer
@@ -273,15 +311,26 @@ def train_segmentation_stage(seg_trainer, labeled_dataloader, epochs=30, device=
     print("=" * 50)
     
     best_loss = float('inf')
+    patience_counter = 0
+    max_patience = 5
+    
+    # Smart batch limiting for segmentation training
+    max_batches_per_epoch = min(100, len(labeled_dataloader))
+    print(f"   Processing {max_batches_per_epoch} batches per epoch (dataset has {len(labeled_dataloader)} total)")
     
     for epoch in range(1, epochs + 1):
         epoch_loss = 0
         num_batches = 0
         
         print(f"\n📚 Segmentation Epoch {epoch}/{epochs}")
+        epoch_start_time = time.time()
         
-        # Use real DataLoader instead of generator function
+        # Use real DataLoader with smart limiting
         for batch_idx, (images, labels) in enumerate(labeled_dataloader):
+            # SMART BATCH LIMITING: Prevent infinite training
+            if batch_idx >= max_batches_per_epoch:
+                print(f"   ✂️ Batch limit reached ({max_batches_per_epoch}), moving to next epoch")
+                break
             # Move to device
             images = images.to(device)
             labels = labels.to(device)
@@ -293,7 +342,10 @@ def train_segmentation_stage(seg_trainer, labeled_dataloader, epochs=30, device=
             num_batches += 1
             
             if batch_idx % 10 == 0:
-                print(f"  Batch {batch_idx}: Loss = {loss:.4f}")
+                # Calculate progress and time estimates
+                progress = (batch_idx + 1) / max_batches_per_epoch
+                elapsed_time = time.time() - epoch_start_time
+                eta_epoch = elapsed_time / progress if progress > 0 else 0
                 
                 # Check output quality
                 final_seg = outputs['final_segmentation']
@@ -308,18 +360,29 @@ def train_segmentation_stage(seg_trainer, labeled_dataloader, epochs=30, device=
                     ).squeeze(1).long()
                 
                 accuracy = (pred_classes == labels).float().mean()
-                print(f"    Batch Accuracy: {accuracy:.3f}")
+                
+                print(f"  Batch {batch_idx+1}/{max_batches_per_epoch} ({progress*100:.1f}%) - "
+                      f"Loss={loss:.4f}, Acc={accuracy:.3f} - "
+                      f"ETA: {eta_epoch-elapsed_time:.0f}s")
             
             
         
         avg_loss = epoch_loss / max(num_batches, 1)
         print(f"📊 Segmentation Epoch {epoch} completed: Average Loss = {avg_loss:.4f}")
         
-        # Save best model
+        # Early stopping with patience
         if avg_loss < best_loss:
             best_loss = avg_loss
+            patience_counter = 0
             torch.save(seg_trainer.model.state_dict(), "./output/best_segmentation_model.pth")
             print(f"💾 New best model saved! Loss: {best_loss:.4f}")
+        else:
+            patience_counter += 1
+            print(f"   No improvement for {patience_counter} epochs")
+            
+            if patience_counter >= max_patience:
+                print(f"🛑 Early stopping triggered after {patience_counter} epochs without improvement")
+                break
     
     print("✅ Semi-supervised segmentation training completed!")
     return seg_trainer
@@ -338,8 +401,16 @@ def evaluate_model(seg_trainer, test_dataloader, device="cuda"):
     class_correct = [0] * 6
     class_total = [0] * 6
     
+    # Smart evaluation limiting - use representative sample
+    max_eval_batches = min(50, len(test_dataloader))
+    print(f"   Evaluating on {max_eval_batches} batches (dataset has {len(test_dataloader)} total)")
+    
     with torch.no_grad():
         for batch_idx, (images, labels) in enumerate(test_dataloader):
+            # SMART EVALUATION LIMITING: Representative sample only
+            if batch_idx >= max_eval_batches:
+                print(f"   ✂️ Evaluation limit reached ({max_eval_batches} batches)")
+                break
             # Move to device
             images = images.to(device)
             labels = labels.to(device)
@@ -430,8 +501,31 @@ def main():
         learning_rate=cvae_lr,
         temperature=0.5  # Higher temperature for stability
     )
+    
+    # Try multiple CVAE model paths (in order of preference)
+    cvae_model_candidates = [
+        "./output/cvae_best.pth",           # Best contrastive model (preferred)
+        "./output/cvae_final.pth",          # Final model (backup)
+        "./output/cvae_epoch_20.pth",       # Late epoch checkpoint
+        "./output/cvae_epoch_15.pth",       # Mid-late epoch checkpoint
+        "./output/cvae_epoch_10.pth",       # Mid epoch checkpoint
+    ]
+    
+    # Find the best available CVAE model
+    cvae_path = None
+    for candidate in cvae_model_candidates:
+        if os.path.exists(candidate):
+            cvae_path = candidate
+            print(f"🎯 Using CVAE model: {candidate}")
+            break
+    
+    if cvae_path is None:
+        print("❌ No CVAE model found! Please run CVAE training first.")
+        print("   Command: python complete_training.py --epochs_cvae 20 --epochs_seg 0")
+        return 1
+    
     seg_trainer = FixedSegmentationTrainer(
-        cvae_path="./output/cvae_best.pth",  # Use best CVAE model
+        cvae_path=cvae_path,  # Use best available CVAE model
         learning_rate=seg_lr,
         device=device
     )

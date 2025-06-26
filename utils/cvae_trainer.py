@@ -296,12 +296,19 @@ class CVAETrainer:
         """Save model if contrastive loss improved"""
         current_contrastive_loss = current_metrics['contrastive_loss']
         
+        print(f"   📊 Contrastive loss: {current_contrastive_loss:.4f} (best: {self.best_contrastive_loss:.4f})")
+        
         if current_contrastive_loss < self.best_contrastive_loss:
+            improvement = self.best_contrastive_loss - current_contrastive_loss
             self.best_contrastive_loss = current_contrastive_loss
             self.save_model(self.best_model_path, epoch, current_metrics)
-            print(f"🏆 New best CVAE model! Contrastive loss: {current_contrastive_loss:.4f}")
+            print(f"🏆 NEW BEST CVAE MODEL! Epoch {epoch}")
+            print(f"   ✅ Contrastive loss improved by {improvement:.4f}")
+            print(f"   💾 Saved to: {self.best_model_path}")
             return True
-        return False
+        else:
+            print(f"   📈 No improvement in contrastive loss")
+            return False
     
     def load_model(self, path):
         """Load CVAE model and training state"""
