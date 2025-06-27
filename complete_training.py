@@ -496,39 +496,13 @@ def main():
     cvae_lr = args.learning_rate * 0.1  # 10x lower for contrastive learning
     seg_lr = args.learning_rate * 0.5   # 2x lower for segmentation
     
-    cvae_trainer = CVAETrainer(
-        device=device, 
-        learning_rate=cvae_lr,
-        temperature=0.5  # Higher temperature for stability
-    )
-    
-    # Try multiple CVAE model paths (in order of preference)
-    cvae_model_candidates = [
-        "./output/cvae_best.pth",           # Best contrastive model (preferred)
-        "./output/cvae_final.pth",          # Final model (backup)
-        "./output/cvae_epoch_20.pth",       # Late epoch checkpoint
-        "./output/cvae_epoch_15.pth",       # Mid-late epoch checkpoint
-        "./output/cvae_epoch_10.pth",       # Mid epoch checkpoint
-    ]
-    
-    # Find the best available CVAE model
-    cvae_path = None
-    for candidate in cvae_model_candidates:
-        if os.path.exists(candidate):
-            cvae_path = candidate
-            print(f"🎯 Using CVAE model: {candidate}")
-            break
-    
-    if cvae_path is None:
-        print("❌ No CVAE model found! Please run CVAE training first.")
-        print("   Command: python complete_training.py --epochs_cvae 20 --epochs_seg 0")
-        return 1
-    
-    seg_trainer = FixedSegmentationTrainer(
-        cvae_path=cvae_path,  # Use best available CVAE model
-        learning_rate=seg_lr,
-        device=device
-    )
+    # Stage 1: CVAE Training (no segmentation trainer needed)
+    if args.epochs_cvae > 0:
+        cvae_trainer = CVAETrainer(
+            device=device, 
+            learning_rate=cvae_lr,
+            temperature=0.5  # Higher temperature for stability
+        )
     
     print(f"  CVAE Learning Rate: {cvae_lr}")
     print(f"  Segmentation Learning Rate: {seg_lr}")
@@ -564,21 +538,53 @@ def main():
     
     try:
         # Stage 1: CVAE Contrastive Learning on real ISPRS data
-        cvae_trainer = train_cvae_stage(cvae_trainer, unlabeled_loader, args.epochs_cvae, device)
+        if args.epochs_cvae > 0:
+            cvae_trainer = train_cvae_stage(cvae_trainer, unlabeled_loader, args.epochs_cvae, device)
+            
+            # Clear GPU memory before next stage
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print("🧹 GPU memory cleared between stages")
         
-        # Clear GPU memory before next stage
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            print("🧹 GPU memory cleared between stages")
+        # Stage 2: Initialize Segmentation Trainer (AFTER CVAE is trained)
+        if args.epochs_seg > 0:
+            # Try multiple CVAE model paths (in order of preference)
+            cvae_model_candidates = [
+                "./output/cvae_best.pth",           # Best contrastive model (preferred)
+                "./output/cvae_final.pth",          # Final model (backup)
+                "./output/cvae_epoch_20.pth",       # Late epoch checkpoint
+                "./output/cvae_epoch_15.pth",       # Mid-late epoch checkpoint
+                "./output/cvae_epoch_10.pth",       # Mid epoch checkpoint
+            ]
+            
+            # Find the best available CVAE model
+            cvae_path = None
+            for candidate in cvae_model_candidates:
+                if os.path.exists(candidate):
+                    cvae_path = candidate
+                    print(f"🎯 Using CVAE model: {candidate}")
+                    break
+            
+            if cvae_path is None:
+                print("❌ No CVAE model found! Please run CVAE training first.")
+                print("   Command: python complete_training.py --epochs_cvae 20 --epochs_seg 0")
+                return 1
+            
+            # NOW create segmentation trainer with trained CVAE
+            seg_trainer = FixedSegmentationTrainer(
+                cvae_path=cvae_path,  # Use best available CVAE model
+                learning_rate=seg_lr,
+                device=device
+            )
+            
+            # Stage 3: Segmentation Training
+            seg_trainer = train_segmentation_stage(seg_trainer, labeled_loader, args.epochs_seg, device)
         
-        # Update segmentation trainer with trained CVAE
-        seg_trainer.cvae = cvae_trainer.cvae
-        
-        # Stage 2: Segmentation Training on labeled ISPRS data
-        seg_trainer = train_segmentation_stage(seg_trainer, labeled_loader, args.epochs_seg, device)
-        
-        # Stage 3: Evaluation on real ISPRS test data
-        final_accuracy = evaluate_model(seg_trainer, test_loader, device)
+        # Stage 4: Evaluation on real ISPRS test data
+        if args.epochs_seg > 0:
+            final_accuracy = evaluate_model(seg_trainer, test_loader, device)
+        else:
+            final_accuracy = 0.0  # No segmentation training, no accuracy to report
         
         # Results
         total_time = time.time() - start_time
