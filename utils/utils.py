@@ -49,15 +49,8 @@ def get_random_pos(img, window_shape):
         max_x = max(0, W - w)  # Ensure non-negative
         max_y = max(0, H - h)  # Ensure non-negative
         
-        if max_x > 0:
-            x1 = random.randint(0, max_x - 1)
-        else:
-            x1 = 0
-            
-        if max_y > 0:
-            y1 = random.randint(0, max_y - 1)
-        else:
-            y1 = 0
+        x1 = random.randint(0, max_x) if max_x > 0 else 0
+        y1 = random.randint(0, max_y) if max_y > 0 else 0
     
     x2 = x1 + w
     y2 = y1 + h
