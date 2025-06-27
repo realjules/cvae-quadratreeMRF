@@ -18,19 +18,40 @@ from data.dataset import ISPRSDataset
 from torch.utils.data import DataLoader
 
 def main():
-    parser = argparse.ArgumentParser(description='Train HVS-Net')
-    parser.add_argument('--config', type=str, required=True, help='Path to the config file.')
+    parser = argparse.ArgumentParser(description='Train HVS-Net for semi-supervised semantic segmentation')
+    parser.add_argument('--config', type=str, default='configs/base_config.yaml', help='Path to the config file.')
     args = parser.parse_args()
 
+    # Load configuration
     config = load_config(args.config)
 
-    # TODO: Initialize datasets and dataloaders
-    # train_dataset = ISPRSDataset(config, mode='train')
-    # train_loader = DataLoader(train_dataset, ...)
+    # Initialize datasets and dataloaders
+    print("Initializing datasets...")
+    train_dataset = ISPRSDataset(config, mode='train')
+    val_dataset = ISPRSDataset(config, mode='validate')
 
-    # TODO: Initialize and run the trainer
-    # trainer = HVSTrainer(config)
-    # trainer.train(train_loader, val_loader)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['training']['batch_size'],
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True
+    )
+
+    # Initialize and run the trainer
+    print("Initializing trainer...")
+    trainer = HVSTrainer(config)
+    trainer.train(train_loader, val_loader)
+
+    print("Training finished.")
 
 if __name__ == '__main__':
     main()

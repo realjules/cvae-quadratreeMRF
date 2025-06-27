@@ -31,9 +31,11 @@ training:
   learning_rate: 0.001
   optimizer: 'AdamW'
   scheduler: 'CosineAnnealingLR'
+  checkpoint_dir: 'checkpoints/'
 
 # Loss settings
 loss:
   supervised_weight: 1.0
   reconstruction_weight: 0.5
   consistency_weight: 1.0
+  kl_weight: 0.1
