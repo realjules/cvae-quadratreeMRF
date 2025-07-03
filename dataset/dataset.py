@@ -104,27 +104,15 @@ class ISPRS_dataset(torch.utils.data.Dataset):
             if self.cache:
                 self.label_cache_[random_idx] = label
 
-        # Get a random patch
-        x1, x2, y1, y2 = get_random_pos(data, self.window_size)
-        data_p = data[x1:x2,y1:y2,:]
-        label_p = label[x1:x2,y1:y2]
-        
-        # FIXED: Ensure consistent patch size by resizing if needed
-        target_size = self.window_size if isinstance(self.window_size, int) else self.window_size[0]
-        if data_p.shape[0] != target_size or data_p.shape[1] != target_size:
-            import torch.nn.functional as F
-            import torch
-            
-            # Convert to tensor format (H,W,C) -> (C,H,W), resize, then back to (H,W,C)
-            data_tensor = torch.from_numpy(data_p).permute(2,0,1).unsqueeze(0).float()  # (1,C,H,W)
-            data_resized = F.interpolate(data_tensor, size=(target_size, target_size), mode='bilinear', align_corners=False)
-            data_p = data_resized.squeeze(0).permute(1,2,0).numpy()  # Back to (H,W,C)
-            
-            # Resize label using nearest neighbor to preserve integer values
-            label_tensor = torch.from_numpy(label_p).unsqueeze(0).unsqueeze(0).float()  # (1,1,H,W)
-            label_resized = F.interpolate(label_tensor, size=(target_size, target_size), mode='nearest')
-            label_p = label_resized.squeeze(0).squeeze(0).numpy().astype(label_p.dtype)  # Back to (H,W)
-        
+        try:
+            # Get a random patch
+            x1, x2, y1, y2 = get_random_pos(data, self.window_size)
+            data_p = data[x1:x2, y1:y2, :]
+            label_p = label[x1:x2, y1:y2]
+        except ValueError:
+            # Image was too small for the window, try another one
+            return self.__getitem__(i)
+
         # Data augmentation
         if self.augmentation:
             augmented = self.aug_pipeline(image=data_p, mask=label_p)

@@ -74,18 +74,13 @@ class ISPRS_unsupervised_dataset(torch.utils.data.Dataset):
             if self.cache:
                 self.data_cache_[random_idx] = data
         
-        # Get a random patch
-        x1, x2, y1, y2 = get_random_pos(data, self.window_size)
-        data_p = data[:, x1:x2,y1:y2] 
-        
-        # FIXED: Ensure consistent patch size by resizing if needed
-        target_size = self.window_size if isinstance(self.window_size, int) else self.window_size[0]
-        if data_p.shape[1] != target_size or data_p.shape[2] != target_size:
-            import torch.nn.functional as F
-            # Convert to tensor, resize, then back to numpy
-            data_tensor = torch.from_numpy(data_p).unsqueeze(0).float()  # Add batch dimension
-            data_resized = F.interpolate(data_tensor, size=(target_size, target_size), mode='bilinear', align_corners=False)
-            data_p = data_resized.squeeze(0).numpy()  # Remove batch dimension
+        try:
+            # Get a random patch
+            x1, x2, y1, y2 = get_random_pos(data, self.window_size)
+            data_p = data[:, x1:x2, y1:y2]
+        except ValueError:
+            # Image was too small for the window, try another one
+            return self.__getitem__(i)
         
         # Data augmentation
         if self.augmentation:

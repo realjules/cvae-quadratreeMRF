@@ -21,45 +21,24 @@ import matplotlib.pyplot as plt
 
 def get_random_pos(img, window_shape):
     """ Extract of 2D random patch of shape window_shape in the image """
-    # Handle both integer (square window) and tuple (rectangular window) inputs
     if isinstance(window_shape, int):
-        w, h = window_shape, window_shape  # Convert int to square dimensions
-    else:
-        w, h = window_shape  # Use provided (width, height) tuple
+        window_shape = (window_shape, window_shape)
     
-    # FIXED: Auto-detect tensor format to handle both (H,W,C) and (C,H,W)
     if len(img.shape) == 3:
-        if img.shape[0] <= 4:  # (C, H, W) format - channels first
-            C, H, W = img.shape
-        else:  # (H, W, C) format - channels last
-            H, W, C = img.shape
-    else:  # 2D image (H, W)
-        H, W = img.shape
-    
-    # FIXED: Robust validation and safe random position generation
-    if H < h or W < w:
-        # Image too small - use safe fallback positioning
-        x1 = max(0, min((W - w) // 2, W - w)) if W >= w else 0
-        y1 = max(0, min((H - h) // 2, H - h)) if H >= h else 0
-        # Ensure we don't exceed bounds
-        w = min(w, W)
-        h = min(h, H)
+        # (C, H, W) format
+        H, W = img.shape[1], img.shape[2]
     else:
-        # FIXED: Safe random position calculation with proper bounds checking
-        max_x = max(0, W - w)  # Ensure non-negative
-        max_y = max(0, H - h)  # Ensure non-negative
-        
-        x1 = random.randint(0, max_x) if max_x > 0 else 0
-        y1 = random.randint(0, max_y) if max_y > 0 else 0
+        # (H, W) format
+        H, W = img.shape
+
+    if H < window_shape[0] or W < window_shape[1]:
+        raise ValueError(f"Image shape ({H}, {W}) is smaller than window shape {window_shape}")
+
+    x1 = random.randint(0, W - window_shape[1])
+    y1 = random.randint(0, H - window_shape[0])
     
-    x2 = x1 + w
-    y2 = y1 + h
-    
-    # Ensure bounds are within image limits
-    x2 = min(x2, W)
-    y2 = min(y2, H)
-    x1 = max(0, x2 - w)
-    y1 = max(0, y2 - h)
+    x2 = x1 + window_shape[1]
+    y2 = y1 + window_shape[0]
     
     return x1, x2, y1, y2
 
