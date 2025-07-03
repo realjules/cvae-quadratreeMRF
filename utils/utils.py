@@ -20,27 +20,42 @@ import matplotlib.pyplot as plt
 
 
 def get_random_pos(img, window_shape):
-    """ Extract of 2D random patch of shape window_shape in the image """
+    """
+    Extracts random patch coordinates of a specified shape from an image.
+
+    Args:
+        img (np.ndarray): The image to extract from, in (C, H, W), (H, W, C), or (H, W) format.
+        window_shape (int or tuple): The desired patch dimensions (height, width).
+
+    Returns:
+        tuple: Coordinates for slicing (y1, y2, x1, x2).
+    """
     if isinstance(window_shape, int):
-        window_shape = (window_shape, window_shape)
-    
-    if len(img.shape) == 3:
-        # (C, H, W) format
-        H, W = img.shape[1], img.shape[2]
+        win_h, win_w = window_shape, window_shape
     else:
-        # (H, W) format
-        H, W = img.shape
+        win_h, win_w = window_shape
 
-    if H < window_shape[0] or W < window_shape[1]:
-        raise ValueError(f"Image shape ({H}, {W}) is smaller than window shape {window_shape}")
+    # Determine image height and width based on its shape
+    if len(img.shape) == 3 and img.shape[0] <= 4:  # (C, H, W)
+        img_h, img_w = img.shape[1], img.shape[2]
+    elif len(img.shape) == 3:  # (H, W, C)
+        img_h, img_w = img.shape[0], img.shape[1]
+    else:  # (H, W)
+        img_h, img_w = img.shape
 
-    x1 = random.randint(0, W - window_shape[1])
-    y1 = random.randint(0, H - window_shape[0])
+    # Validate that the image is large enough for the patch
+    if img_h < win_h or img_w < win_w:
+        raise ValueError(f"Image shape ({img_h}, {img_w}) is smaller than window shape ({win_h}, {win_w})")
+
+    # Generate random top-left coordinates
+    y1 = random.randint(0, img_h - win_h)
+    x1 = random.randint(0, img_w - win_w)
+
+    # Calculate bottom-right coordinates
+    y2 = y1 + win_h
+    x2 = x1 + win_w
     
-    x2 = x1 + window_shape[1]
-    y2 = y1 + window_shape[0]
-    
-    return x1, x2, y1, y2
+    return y1, y2, x1, x2
 
 
 def accuracy(input, target):
