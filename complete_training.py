@@ -464,7 +464,7 @@ def main():
     parser.add_argument('--epochs_cvae', default=20, type=int, help='CVAE training epochs')
     parser.add_argument('--epochs_seg', default=30, type=int, help='Segmentation training epochs')
     parser.add_argument('--batch_size', default=4, type=int, help='Batch size')
-    parser.add_argument('--learning_rate', default=0.001, type=float, help='Learning rate')
+    parser.add_argument('--learning_rate', default=0.0001, type=float, help='Learning rate')
     parser.add_argument('--labeled_percent', default=10, type=int, help='Percentage of labeled data')
     parser.add_argument('--target_accuracy', default=90, type=float, help='Target accuracy')
     parser.add_argument('--device', default='auto', help='Device (cuda/cpu/auto)')
