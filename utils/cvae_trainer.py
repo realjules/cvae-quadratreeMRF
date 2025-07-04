@@ -63,9 +63,9 @@ class CVAETrainer:
         self.contrastive_aug = ContrastiveAugmentation(size=256, strength=0.8)
         
         # Loss weights
-        self.recon_weight = 1.0
+        self.recon_weight = 0.1
         self.kl_weight = 0.1
-        self.contrastive_weight = 10.0
+        self.contrastive_weight = 1.0
         
         # Metrics tracking
         self.metrics = {
