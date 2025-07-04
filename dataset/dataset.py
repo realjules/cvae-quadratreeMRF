@@ -113,11 +113,16 @@ class ISPRS_dataset(torch.utils.data.Dataset):
             # Image was too small for the window, try another one
             return self.__getitem__(i)
 
-        # Data augmentation
+        # Data augmentation & tensor conversion
         if self.augmentation:
             augmented = self.aug_pipeline(image=data_p, mask=label_p)
             data_p = augmented['image']
             label_p = augmented['mask']
+        else:
+            # When no augmentation, manually convert to tensor and permute channels
+            data_p = torch.from_numpy(data_p).permute(2, 0, 1)
+            label_p = torch.from_numpy(label_p)
+
 
         # Return the torch.Tensor values
         return (data_p, label_p)
