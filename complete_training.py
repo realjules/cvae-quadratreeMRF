@@ -283,7 +283,7 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
         # Additional saving strategies to ensure we don't lose good models
         
         # Strategy 1: Periodic checkpoint saving (every 5 epochs)
-        if epoch % 5 == 0:
+        if epoch % 20 == 0:
             cvae_trainer.save_model(f"./output/cvae_epoch_{epoch}.pth", epoch)
             print(f"💾 Periodic checkpoint saved: epoch {epoch}")
         
