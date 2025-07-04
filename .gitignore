@@ -22,8 +22,9 @@ rad.json
 TestResults.xml
 venv/
 __pycache__/
-input/
+
 output/
+input/
 .claude/
 
 # 1. Validate Implementation

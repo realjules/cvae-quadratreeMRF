@@ -25,26 +25,36 @@ class ISPRSDataset(Dataset):
         self.mode = mode
 
         # Get all image paths
-        self.image_paths = sorted(glob.glob(os.path.join(config['data']['data_dir'], '*.tif')))
+        self.all_image_paths = sorted(glob.glob(os.path.join(config['data']['data_dir'], '*.tif')))
         self.label_paths = sorted(glob.glob(os.path.join(config['data']['label_dir'], '*.tif')))
 
-        # Create a map of image IDs to label paths for easy lookup
-        label_map = {os.path.basename(lp).replace('_noBoundary', ''): lp for lp in self.label_paths}
+        # Create a map of label basenames to full paths
+        label_basename_map = {os.path.basename(lp): lp for lp in self.label_paths}
+
+        # Filter for images that have a corresponding label, creating a direct mapping
+        self.image_to_label_map = {
+            p: label_basename_map[os.path.basename(p)]
+            for p in self.all_image_paths
+            if os.path.basename(p) in label_basename_map
+        }
         
-        # Split into labeled and unlabeled sets
-        num_labeled = int(len(self.image_paths) * (config['data']['labeled_percentage'] / 100.0))
+        self.labelable_image_paths = sorted(self.image_to_label_map.keys())
+
+        # Split the labelable images into training and validation sets
+        num_labeled_train = int(len(self.labelable_image_paths) * (config['data']['labeled_percentage'] / 100.0))
         
         if mode == 'train':
-            self.labeled_image_paths = self.image_paths[:num_labeled]
-            self.unlabeled_image_paths = self.image_paths
+            self.labeled_image_paths = self.labelable_image_paths[:num_labeled_train]
+            self.unlabeled_image_paths = self.all_image_paths  # Use all images for unsupervised learning
             print(f"Training with {len(self.labeled_image_paths)} labeled images and {len(self.unlabeled_image_paths)} unlabeled images.")
         elif mode == 'validate':
-            # For validation, we only need labeled data
-            self.labeled_image_paths = self.image_paths[num_labeled:]
+            self.labeled_image_paths = self.labelable_image_paths[num_labeled_train:]
             self.unlabeled_image_paths = []
             print(f"Validating with {len(self.labeled_image_paths)} images.")
 
-        self.labeled_map = {p: label_map.get(os.path.basename(p)) for p in self.labeled_image_paths}
+        # The __getitem__ method will now use self.image_to_label_map for a direct, safe lookup.
+        # For simplicity, we rename it to self.labeled_map to match the variable name in __getitem__
+        self.labeled_map = self.image_to_label_map
 
         # Define augmentation pipelines
         self.base_aug = A.Compose([

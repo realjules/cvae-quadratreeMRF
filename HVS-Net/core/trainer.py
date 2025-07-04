@@ -26,7 +26,9 @@ class HVSTrainer:
         self.model = HVSNet(
             n_channels=config['model']['n_channels'],
             n_classes=config['model']['n_classes'],
-            latent_dim=config['model']['latent_dim']
+            latent_dim=config['model']['latent_dim'],
+            encoder_hidden_dims=config['model']['encoder_hidden_dims'],
+            decoder_hidden_dims=config['model']['decoder_hidden_dims']
         ).to(self.device)
 
         # Initialize losses

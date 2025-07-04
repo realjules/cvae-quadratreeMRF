@@ -522,7 +522,7 @@ class FixedSegmentationTrainer:
             )
         
         # Compute loss
-        loss = self.criterion(final_seg, labels)
+        loss = self.criterion(final_seg, labels.long())
         
         # Backward pass
         self.optimizer.zero_grad()
