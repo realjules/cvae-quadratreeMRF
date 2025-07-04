@@ -65,7 +65,7 @@ class CVAETrainer:
         # Loss weights
         self.recon_weight = 1.0
         self.kl_weight = 0.1
-        self.contrastive_weight = 1.0
+        self.contrastive_weight = 10.0
         
         # Metrics tracking
         self.metrics = {
