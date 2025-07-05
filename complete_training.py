@@ -470,6 +470,7 @@ def main():
     parser.add_argument('--device', default='auto', help='Device (cuda/cpu/auto)')
     parser.add_argument('--output_dir', default='./output/', help='Output directory')
     
+    parser.add_argument('--temperature', default=0.1, type=float, help='Temperature for contrastive loss')
     parser.add_argument('--kl_weight', default=0.1, type=float, help='Weight for KL divergence loss')
     parser.add_argument('--latent_dim', default=256, type=int, help='Latent dimension size')
     parser.add_argument('--contrastive_weight', default=1.0, type=float, help='Weight for contrastive loss')
@@ -513,7 +514,7 @@ def main():
     
     print(f"  CVAE Learning Rate: {cvae_lr}")
     print(f"  Segmentation Learning Rate: {seg_lr}")
-    print(f"  Temperature: 0.5")
+    print(f"  Temperature: {args.temperature}")
     
     # Create real ISPRS data loaders
     print("📊 Creating real ISPRS data loaders...")

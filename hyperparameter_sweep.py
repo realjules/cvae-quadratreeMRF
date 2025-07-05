@@ -27,7 +27,7 @@ def run_trial(params):
 
     # Construct the training command
     command = [
-        'python', 'complete_training.py',
+        'python3', 'complete_training.py',
         '--epochs_cvae', str(EPOCHS_PER_TRIAL),
         '--epochs_seg', '0',
         '--contrastive_weight', str(params['contrastive_weight']),
