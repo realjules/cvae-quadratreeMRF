@@ -30,7 +30,7 @@ class CVAETrainer:
                  hidden_dims=None,
                  learning_rate=1e-4,
                  device="cuda",
-                 temperature=0.1,
+                 temperature=0.07,
                  use_memory_bank=True):
         
         self.device = device
@@ -63,9 +63,9 @@ class CVAETrainer:
         self.contrastive_aug = ContrastiveAugmentation(size=256, strength=0.8)
         
         # Loss weights
-        self.recon_weight = 0.1
+        self.recon_weight = 1.0
         self.kl_weight = 0.1
-        self.contrastive_weight = 1.0
+        self.contrastive_weight = 100.0
         
         # Metrics tracking
         self.metrics = {
