@@ -256,7 +256,7 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
                       f"ETA: {eta_epoch-elapsed_time:.0f}s")
                 
                 # Early stopping if loss becomes too high
-                if metrics['total_loss'] > 50.0:
+                if metrics['total_loss'] > 100.0:
                     print(f"  ⚠️  Loss too high ({metrics['total_loss']:.2f}), reducing learning rate...")
                     for param_group in cvae_trainer.optimizer.param_groups:
                         param_group['lr'] *= 0.5
@@ -470,6 +470,10 @@ def main():
     parser.add_argument('--device', default='auto', help='Device (cuda/cpu/auto)')
     parser.add_argument('--output_dir', default='./output/', help='Output directory')
     
+    parser.add_argument('--kl_weight', default=0.1, type=float, help='Weight for KL divergence loss')
+    parser.add_argument('--latent_dim', default=256, type=int, help='Latent dimension size')
+    parser.add_argument('--contrastive_weight', default=1.0, type=float, help='Weight for contrastive loss')
+
     args = parser.parse_args()
     
     # Setup
@@ -501,7 +505,10 @@ def main():
         cvae_trainer = CVAETrainer(
             device=device, 
             learning_rate=cvae_lr,
-            temperature=0.5  # Higher temperature for stability
+            temperature=args.temperature,
+            contrastive_weight=args.contrastive_weight,
+            kl_weight=args.kl_weight,
+            latent_dim=args.latent_dim
         )
     
     print(f"  CVAE Learning Rate: {cvae_lr}")

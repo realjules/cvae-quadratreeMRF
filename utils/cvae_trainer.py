@@ -31,6 +31,8 @@ class CVAETrainer:
                  learning_rate=1e-4,
                  device="cuda",
                  temperature=0.07,
+                 kl_weight=0.1,
+                 contrastive_weight=1.0,
                  use_memory_bank=True):
         
         self.device = device
@@ -64,8 +66,8 @@ class CVAETrainer:
         
         # Loss weights
         self.recon_weight = 1.0
-        self.kl_weight = 0.1
-        self.contrastive_weight = 100.0
+        self.kl_weight = kl_weight
+        self.contrastive_weight = contrastive_weight
         
         # Metrics tracking
         self.metrics = {
