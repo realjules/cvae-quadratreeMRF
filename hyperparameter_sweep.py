@@ -40,13 +40,15 @@ def run_trial(params):
     ]
 
     # Execute the command and capture output
+    result = None
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True)
         output = result.stdout
     except subprocess.CalledProcessError as e:
         print(f"❌ ERROR during training run:")
         print(e.stderr)
-        print(result.stdout)
+        if result is not None:
+            print(result.stdout)
         return None
 
     # Parse the output to find the best contrastive loss

@@ -70,6 +70,7 @@ class CVAETrainer:
         self.kl_weight = kl_weight
         self.kl_warmup_epochs = kl_warmup_epochs
         self.beta = 0.0 if kl_warmup_epochs > 0 else 1.0
+        self.contrastive_weight = contrastive_weight
         
         # Metrics tracking
         self.metrics = {
