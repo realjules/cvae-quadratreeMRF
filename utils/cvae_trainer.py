@@ -33,6 +33,7 @@ class CVAETrainer:
                  temperature=0.07,
                  kl_weight=0.1,
                  contrastive_weight=1.0,
+                 kl_warmup_epochs=0,
                  use_memory_bank=True):
         
         self.device = device
@@ -67,7 +68,8 @@ class CVAETrainer:
         # Loss weights
         self.recon_weight = 1.0
         self.kl_weight = kl_weight
-        self.contrastive_weight = contrastive_weight
+        self.kl_warmup_epochs = kl_warmup_epochs
+        self.beta = 0.0 if kl_warmup_epochs > 0 else 1.0
         
         # Metrics tracking
         self.metrics = {
@@ -144,9 +146,9 @@ class CVAETrainer:
             # Use simple SimCLR-style loss
             contrast_loss = simclr_loss_simple(z_proj1, z_proj2, self.temperature)
         
-        # Total loss
+        # Total loss with KL warm-up
         total_loss = (self.recon_weight * recon_loss + 
-                     self.kl_weight * kl_loss + 
+                     self.beta * self.kl_weight * kl_loss + 
                      self.contrastive_weight * contrast_loss)
         
         # Backward pass
@@ -266,6 +268,10 @@ class CVAETrainer:
             epoch_metrics[key] /= epoch_metrics['count']
             self.metrics[key].append(epoch_metrics[key])
         
+        # Update KL warm-up beta
+        if self.kl_warmup_epochs > 0:
+            self.beta = min(1.0, epoch / self.kl_warmup_epochs)
+
         # Step scheduler
         self.scheduler.step()
         

@@ -472,6 +472,7 @@ def main():
     
     parser.add_argument('--temperature', default=0.1, type=float, help='Temperature for contrastive loss')
     parser.add_argument('--kl_weight', default=0.1, type=float, help='Weight for KL divergence loss')
+    parser.add_argument('--kl_warmup_epochs', default=0, type=int, help='Number of epochs for KL warm-up')
     parser.add_argument('--latent_dim', default=256, type=int, help='Latent dimension size')
     parser.add_argument('--contrastive_weight', default=1.0, type=float, help='Weight for contrastive loss')
 
@@ -509,7 +510,7 @@ def main():
             temperature=args.temperature,
             contrastive_weight=args.contrastive_weight,
             kl_weight=args.kl_weight,
-            latent_dim=args.latent_dim
+            kl_warmup_epochs=args.kl_warmup_epochs,
         )
     
     print(f"  CVAE Learning Rate: {cvae_lr}")

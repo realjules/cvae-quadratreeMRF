@@ -16,6 +16,7 @@ search_space = {
     'temperature': [0.05, 0.07, 0.1, 0.2, 0.5],
     'learning_rate': [1e-5, 5e-5, 1e-4, 2e-4, 5e-4],
     'kl_weight': [0.01, 0.1, 0.2, 0.5],
+    'kl_warmup_epochs': [0, 5, 10],
     'latent_dim': [128, 256]
 }
 
@@ -34,6 +35,7 @@ def run_trial(params):
         '--temperature', str(params['temperature']),
         '--learning_rate', str(params['learning_rate']),
         '--kl_weight', str(params['kl_weight']),
+        '--kl_warmup_epochs', str(params['kl_warmup_epochs']),
         '--latent_dim', str(params['latent_dim'])
     ]
 
@@ -44,6 +46,7 @@ def run_trial(params):
     except subprocess.CalledProcessError as e:
         print(f"❌ ERROR during training run:")
         print(e.stderr)
+        print(result.stdout)
         return None
 
     # Parse the output to find the best contrastive loss

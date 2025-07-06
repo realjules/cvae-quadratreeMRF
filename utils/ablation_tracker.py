@@ -14,8 +14,7 @@ def log_ablation(params, metrics, file_path="../ABLATIONS.md"):
     # Create the file and header if it doesn't exist
     if not os.path.exists(file_path):
         with open(file_path, "w") as f:
-            header = "| Date | Contrastive Weight | Temperature | Learning Rate | KL Weight | Latent Dim | Best Contrastive Loss |\n"
-            header += "|---|---|---|---|---|---|---|"
+            header = "| Date | Contrastive Weight | Temperature | Learning Rate | KL Weight | Latent Dim | KL Warmup Epochs | Best Contrastive Loss |\n"            header += "|---|---|---|---|---|---|---|---|
             f.write(header)
 
     # Create the new log entry
@@ -25,6 +24,7 @@ def log_ablation(params, metrics, file_path="../ABLATIONS.md"):
     log_entry += f"{params.get('learning_rate', 'N/A')} | "
     log_entry += f"{params.get('kl_weight', 'N/A')} | "
     log_entry += f"{params.get('latent_dim', 'N/A')} | "
+    log_entry += f"{params.get('kl_warmup_epochs', 'N/A')} | "
     log_entry += f"{metrics.get('best_contrastive_loss', 'N/A'):.4f} |"
 
     # Append to the file
