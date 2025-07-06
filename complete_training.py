@@ -559,8 +559,8 @@ def main():
         if args.epochs_seg > 0:
             # Try multiple CVAE model paths (in order of preference)
             cvae_model_candidates = [
-                "./output/cvae_best.pth",           # Best contrastive model (preferred)
                 "./output/cvae_final.pth",          # Final model (backup)
+                "./output/cvae_best.pth",           # Best contrastive model (preferred)
                 "./output/cvae_epoch_20.pth",       # Late epoch checkpoint
                 "./output/cvae_epoch_15.pth",       # Mid-late epoch checkpoint
                 "./output/cvae_epoch_10.pth",       # Mid epoch checkpoint
