@@ -14,7 +14,8 @@ def log_ablation(params, metrics, file_path="../ABLATIONS.md"):
     # Create the file and header if it doesn't exist
     if not os.path.exists(file_path):
         with open(file_path, "w") as f:
-            header = "| Date | Contrastive Weight | Temperature | Learning Rate | KL Weight | Latent Dim | KL Warmup Epochs | Best Contrastive Loss |\n"            header += "|---|---|---|---|---|---|---|---|
+            header = "| Date | Contrastive Weight | Temperature | Learning Rate | KL Weight | Latent Dim | KL Warmup Epochs | Best Contrastive Loss |"
+            "|---|---|---|---|---|---|---|---|"
             f.write(header)
 
     # Create the new log entry
