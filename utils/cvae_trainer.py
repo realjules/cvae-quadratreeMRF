@@ -84,15 +84,106 @@ class CVAETrainer:
         self.best_contrastive_loss = float('inf')
         self.best_model_path = "./output/cvae_best.pth"
         
-    def train_step_contrastive(self, batch_images):
+    def train_step_pure_contrastive(self, batch_images):
         """
-        Training step focused on contrastive learning (unsupervised)
+        Training step focused on PURE contrastive learning (SimCLR/MoCo style).
+        This is the new method for our experiment.
+        """
+        self.cvae.train()
+        batch_size = batch_images.size(0)
+
+        # Generate augmented pairs for contrastive learning
+        view1_batch = []
+        view2_batch = []
+        for i in range(batch_size):
+            image = batch_images[i]
+            view1, view2 = self.contrastive_aug(image)
+            view1_batch.append(view1)
+            view2_batch.append(view2)
+
+        view1_batch = torch.stack(view1_batch).to(self.device)
+        view2_batch = torch.stack(view2_batch).to(self.device)
+
+        # Forward pass through encoder and projection head ONLY
+        mu1, _, _ = self.cvae.encode(view1_batch)
+        z_proj1 = self.cvae.project(mu1)
+        z_proj1_norm = F.normalize(z_proj1, dim=1)
+
+        mu2, _, _ = self.cvae.encode(view2_batch)
+        z_proj2 = self.cvae.project(mu2)
+        z_proj2_norm = F.normalize(z_proj2, dim=1)
+
+        # Contrastive loss
+        if self.use_memory_bank and hasattr(self.cvae, 'queue'):
+            # MoCo-style loss
+            contrast_loss = contrastive_loss(z_proj1_norm, z_proj2_norm, self.temperature, self.cvae.queue)
+            self.cvae.update_queue(z_proj1_norm.detach()) # Update queue
+        else:
+            # SimCLR-style loss
+            contrast_loss = simclr_loss_simple(z_proj1_norm, z_proj2_norm, self.temperature)
+
+        # The loss is ONLY the contrastive loss
+        total_loss = self.contrastive_weight * contrast_loss
+
+        # Backward pass
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.cvae.parameters(), max_norm=1.0)
+        self.optimizer.step()
+
+        return {
+            'total_loss': total_loss.item(),
+            'recon_loss': 0,  # Not used
+            'kl_loss': 0,  # Not used
+            'contrastive_loss': contrast_loss.item(),
+            'batch_size': batch_size
+        }
+
+    def train_epoch_contrastive(self, dataloader, epoch):
+        """
+        This is the main entry point for training. For our experiment,
+        it will now call the 'pure' contrastive learning epoch.
+        """
+        return self.train_epoch_pure_contrastive(dataloader, epoch)
+
+    def train_epoch_pure_contrastive(self, dataloader, epoch):
+        """Train one epoch with PURE contrastive learning"""
+        self.cvae.train()
+        epoch_metrics = {'total_loss': 0, 'recon_loss': 0, 'kl_loss': 0, 'contrastive_loss': 0, 'count': 0}
         
-        Args:
-            batch_images: [B, C, H, W] batch of images
+        progress_bar = tqdm(dataloader, desc=f"CVAE Pure Contrastive Epoch {epoch}")
+        
+        for batch_idx, (images, _) in enumerate(progress_bar):
+            images = images.to(self.device)
             
-        Returns:
-            dict: Loss components and metrics
+            # Use the new pure contrastive training step
+            metrics = self.train_step_pure_contrastive(images)
+            
+            # Update epoch metrics
+            for key in ['total_loss', 'contrastive_loss']:
+                epoch_metrics[key] += metrics[key] * metrics['batch_size']
+            epoch_metrics['count'] += metrics['batch_size']
+            
+            # Update progress bar
+            progress_bar.set_postfix({
+                'Loss': f"{metrics['total_loss']:.4f}",
+                'Contrast': f"{metrics['contrastive_loss']:.4f}"
+            })
+        
+        # Calculate average metrics
+        for key in ['total_loss', 'contrastive_loss']:
+            epoch_metrics[key] /= epoch_metrics['count']
+            self.metrics[key].append(epoch_metrics[key])
+        
+        # Step scheduler
+        self.scheduler.step()
+        
+        return epoch_metrics
+
+    def train_step_hybrid_contrastive(self, batch_images):
+        """
+        This is the original hybrid training step, preserved for comparison.
+        It combines VAE and contrastive losses.
         """
         self.cvae.train()
         batch_size = batch_images.size(0)
@@ -102,17 +193,13 @@ class CVAETrainer:
         view2_batch = []
         
         for i in range(batch_size):
-            # Get single image
-            image = batch_images[i]  # [C, H, W]
-            
-            # Generate two augmented views
+            image = batch_images[i]
             view1, view2 = self.contrastive_aug(image)
             view1_batch.append(view1)
             view2_batch.append(view2)
         
-        # Stack into batches
-        view1_batch = torch.stack(view1_batch).to(self.device)  # [B, C, H, W]
-        view2_batch = torch.stack(view2_batch).to(self.device)  # [B, C, H, W]
+        view1_batch = torch.stack(view1_batch).to(self.device)
+        view2_batch = torch.stack(view2_batch).to(self.device)
         
         # Forward pass through CVAE for both views
         outputs1 = self.cvae(view1_batch)
@@ -123,28 +210,25 @@ class CVAETrainer:
         recon2, mu2, log_var2 = outputs2['reconstruction'], outputs2['mu'], outputs2['log_var']
         z_proj1, z_proj2 = outputs1['z_proj'], outputs2['z_proj']
         
-        # 1. Reconstruction loss (for both views)
+        # 1. Reconstruction loss
         recon_loss1 = F.mse_loss(recon1, view1_batch)
         recon_loss2 = F.mse_loss(recon2, view2_batch)
         recon_loss = (recon_loss1 + recon_loss2) / 2
         
-        # 2. KL divergence loss (for both views)
+        # 2. KL divergence loss
         kl_loss1 = -0.5 * torch.sum(1 + log_var1 - mu1.pow(2) - log_var1.exp(), dim=1).mean()
         kl_loss2 = -0.5 * torch.sum(1 + log_var2 - mu2.pow(2) - log_var2.exp(), dim=1).mean()
         kl_loss = (kl_loss1 + kl_loss2) / 2
         
-        # 3. Contrastive loss between projected features
+        # 3. Contrastive loss
         if self.use_memory_bank and hasattr(self.cvae, 'queue'):
-            # Use MoCo-style contrastive loss with memory bank
             queue = self.cvae.queue
-            # Check queue dimensions before using
             if queue.size(1) == z_proj1.size(1):
                 contrast_loss = contrastive_loss(z_proj1, z_proj2, self.temperature, queue)
             else:
                 print(f"⚠️  Queue dimension mismatch: using simple contrastive loss")
                 contrast_loss = simclr_loss_simple(z_proj1, z_proj2, self.temperature)
         else:
-            # Use simple SimCLR-style loss
             contrast_loss = simclr_loss_simple(z_proj1, z_proj2, self.temperature)
         
         # Total loss with KL warm-up
@@ -155,13 +239,9 @@ class CVAETrainer:
         # Backward pass
         self.optimizer.zero_grad()
         total_loss.backward()
-        
-        # Gradient clipping
         torch.nn.utils.clip_grad_norm_(self.cvae.parameters(), max_norm=1.0)
-        
         self.optimizer.step()
         
-        # Return metrics
         return {
             'total_loss': total_loss.item(),
             'recon_loss': recon_loss.item(),
@@ -238,18 +318,18 @@ class CVAETrainer:
                 'latent_log_var': log_var
             }
     
-    def train_epoch_contrastive(self, dataloader, epoch):
-        """Train one epoch with contrastive learning"""
+    def train_epoch_hybrid_contrastive(self, dataloader, epoch):
+        """This is the original CVAE Contrastive Epoch, preserved for comparison."""
         self.cvae.train()
         epoch_metrics = {'total_loss': 0, 'recon_loss': 0, 'kl_loss': 0, 'contrastive_loss': 0, 'count': 0}
         
-        progress_bar = tqdm(dataloader, desc=f"CVAE Contrastive Epoch {epoch}")
+        progress_bar = tqdm(dataloader, desc=f"CVAE Hybrid Contrastive Epoch {epoch}")
         
         for batch_idx, (images, _) in enumerate(progress_bar):
             images = images.to(self.device)
             
-            # Contrastive training step
-            metrics = self.train_step_contrastive(images)
+            # Original hybrid training step
+            metrics = self.train_step_hybrid_contrastive(images)
             
             # Update epoch metrics
             for key in ['total_loss', 'recon_loss', 'kl_loss', 'contrastive_loss']:
