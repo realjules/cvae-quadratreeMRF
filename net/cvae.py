@@ -79,16 +79,104 @@ class EnhancedCVAE(nn.Module):
             nn.Sigmoid()
         )
         
+        # Momentum coefficient for MoCo
+        self.m = 0.999 # As per MoCo paper
+
+        # ====== ENCODER (Query Encoder) ======
+        self.base_encoder_block1 = nn.Sequential(
+            nn.Conv2d(input_channels, hidden_dims[0], kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(hidden_dims[0]),
+            nn.LeakyReLU(0.2),
+        )
+        
+        self.base_encoder_block2 = nn.Sequential(
+            nn.Conv2d(hidden_dims[0], hidden_dims[1], kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(hidden_dims[1]),
+            nn.LeakyReLU(0.2),
+        )
+        
+        self.base_encoder_block3 = nn.Sequential(
+            nn.Conv2d(hidden_dims[1], hidden_dims[2], kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(hidden_dims[2]),
+            nn.LeakyReLU(0.2),
+        )
+        
+        # Projection head for contrastive learning (Query Projection Head)
+        self.base_projection_head = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.BatchNorm1d(latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim, latent_dim // 2),
+            nn.BatchNorm1d(latent_dim // 2),
+            nn.ReLU(),
+            nn.Linear(latent_dim // 2, latent_dim // 4)
+        )
+
+        # ====== KEY ENCODER (Momentum Encoder) ======
+        self.key_encoder_block1 = nn.Sequential(
+            nn.Conv2d(input_channels, hidden_dims[0], kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(hidden_dims[0]),
+            nn.LeakyReLU(0.2),
+        )
+        
+        self.key_encoder_block2 = nn.Sequential(
+            nn.Conv2d(hidden_dims[0], hidden_dims[1], kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(hidden_dims[1]),
+            nn.LeakyReLU(0.2),
+        )
+        
+        self.key_encoder_block3 = nn.Sequential(
+            nn.Conv2d(hidden_dims[1], hidden_dims[2], kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(hidden_dims[2]),
+            nn.LeakyReLU(0.2),
+        )
+        
+        # Key Projection Head
+        self.key_projection_head = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.BatchNorm1d(latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim, latent_dim // 2),
+            nn.BatchNorm1d(latent_dim // 2),
+            nn.ReLU(),
+            nn.Linear(latent_dim // 2, latent_dim // 4)
+        )
+
+        # Initialize key encoder and key projection head with base encoder weights
+        for param_q, param_k in zip(self.base_encoder_block1.parameters(), self.key_encoder_block1.parameters()):
+            param_k.data.copy_(param_q.data)
+            param_k.requires_grad = False
+        for param_q, param_k in zip(self.base_encoder_block2.parameters(), self.key_encoder_block2.parameters()):
+            param_k.data.copy_(param_q.data)
+            param_k.requires_grad = False
+        for param_q, param_k in zip(self.base_encoder_block3.parameters(), self.key_encoder_block3.parameters()):
+            param_k.data.copy_(param_q.data)
+            param_k.requires_grad = False
+        for param_q, param_k in zip(self.base_projection_head.parameters(), self.key_projection_head.parameters()):
+            param_k.data.copy_(param_q.data)
+            param_k.requires_grad = False
+
         # Contrastive learning memory bank
         self.register_buffer("queue", torch.randn(4096, latent_dim // 4))
         self.queue = F.normalize(self.queue, dim=1)
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
-    
+
+    def _encode_base(self, x):
+        x1 = self.base_encoder_block1(x)
+        x2 = self.base_encoder_block2(x1)
+        x3 = self.base_encoder_block3(x2)
+        return x1, x2, x3
+
+    @torch.no_grad()
+    def _encode_key(self, x):
+        x1 = self.key_encoder_block1(x)
+        x2 = self.key_encoder_block2(x1)
+        x3 = self.key_encoder_block3(x2)
+        return x1, x2, x3
+
     def encode(self, x):
-        """Encode input images to latent representations with skip connections"""
-        x1 = self.encoder_block1(x)
-        x2 = self.encoder_block2(x1)
-        x3 = self.encoder_block3(x2)
+        """Encode input images to latent representations with skip connections (using base encoder)"""
+        x1, x2, x3 = self._encode_base(x)
         
         encoder_features = [x1, x2, x3]
         
@@ -143,32 +231,52 @@ class EnhancedCVAE(nn.Module):
         
         return x
     
-    def forward(self, x):
-        """Forward pass through the Enhanced CVAE"""
-        mu, log_var, encoder_features = self.encode(x)
-        z = self.reparameterize(mu, log_var)
-        x_recon = self.decode(z, encoder_features)
-        z_proj = self.project(z)
-        z_proj_norm = F.normalize(z_proj, dim=1)
-        
-        if self.training:
-            with torch.no_grad():
-                self.update_queue(z_proj_norm.detach())
+    @torch.no_grad()
+    def _momentum_update_key_encoder(self):
+        """Momentum update of the key encoder"""
+        for param_q, param_k in zip(self.base_encoder_block1.parameters(), self.key_encoder_block1.parameters()):
+            param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
+        for param_q, param_k in zip(self.base_encoder_block2.parameters(), self.key_encoder_block2.parameters()):
+            param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
+        for param_q, param_k in zip(self.base_encoder_block3.parameters(), self.key_encoder_block3.parameters()):
+            param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
+        for param_q, param_k in zip(self.base_projection_head.parameters(), self.key_projection_head.parameters()):
+            param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
+
+    def forward(self, x_query, x_key=None):
+        """Forward pass through the Enhanced CVAE for MoCo-style training"""
+        # Query branch
+        mu_q, log_var_q, encoder_features_q = self.encode(x_query)
+        z_q = self.reparameterize(mu_q, log_var_q)
+        z_proj_q = F.normalize(self.base_projection_head(z_q), dim=1)
+
+        # Key branch (no grad)
+        with torch.no_grad():
+            self._momentum_update_key_encoder() # Update key encoder
+            if x_key is None: # If x_key is not provided, use x_query
+                x_key = x_query
+            mu_k, log_var_k, _ = self._encode_key(x_key)
+            z_k = self.reparameterize(mu_k, log_var_k)
+            z_proj_k = F.normalize(self.key_projection_head(z_k), dim=1)
+
+        # Reconstruction (from query branch)
+        x_recon = self.decode(z_q, encoder_features_q)
         
         return {
             'reconstruction': x_recon,
-            'mu': mu,
-            'log_var': log_var,
-            'z': z,
-            'z_proj': z_proj_norm,
-            'original_input': x,
+            'mu': mu_q,
+            'log_var': log_var_q,
+            'z_q': z_q,
+            'z_proj_q': z_proj_q,
+            'z_proj_k': z_proj_k,
+            'original_input': x_query,
             'queue': self.queue,
-            'encoder_features': encoder_features
+            'encoder_features': encoder_features_q
         }
     
     def project(self, z):
-        """Project latent representations for contrastive learning"""
-        return self.projection_head(z)
+        """Project latent representations for contrastive learning (using base projection head)"""
+        return self.base_projection_head(z)
     
     @torch.no_grad()
     def update_queue(self, z_proj):

@@ -104,21 +104,19 @@ class CVAETrainer:
         view1_batch = torch.stack(view1_batch).to(self.device)
         view2_batch = torch.stack(view2_batch).to(self.device)
 
-        # Forward pass through encoder and projection head ONLY
-        mu1, _, _ = self.cvae.encode(view1_batch)
-        z_proj1 = self.cvae.project(mu1)
-        z_proj1_norm = F.normalize(z_proj1, dim=1)
+        # Forward pass through CVAE for both views
+        outputs1 = self.cvae(view1_batch)
+        outputs2 = self.cvae(view2_batch, x_key=view1_batch) # Pass view1 as key for view2
 
-        mu2, _, _ = self.cvae.encode(view2_batch)
-        z_proj2 = self.cvae.project(mu2)
-        z_proj2_norm = F.normalize(z_proj2, dim=1)
+        z_proj1_norm = outputs1['z_proj_q']
+        z_proj2_norm = outputs2['z_proj_q']
+        z_proj_k_for_queue = outputs2['z_proj_k'] # Features from key encoder for queue
 
-        # Contrastive loss
         # Contrastive loss
         if self.use_memory_bank and hasattr(self.cvae, 'queue'):
             # MoCo-style loss
             contrast_loss = contrastive_loss(z_proj1_norm, z_proj2_norm, self.temperature, self.cvae.queue)
-            self.cvae.update_queue(z_proj1_norm) # Update queue
+            self.cvae.update_queue(z_proj_k_for_queue) # Update queue with key encoder features
         else:
             # SimCLR-style loss
             contrast_loss = simclr_loss_simple(z_proj1_norm, z_proj2_norm, self.temperature)
