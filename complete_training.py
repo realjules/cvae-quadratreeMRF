@@ -231,7 +231,7 @@ def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda
             combined_batch = torch.cat([view1_batch, view2_batch], dim=0)
             
             # Train step with NaN detection
-            metrics = cvae_trainer.train_step_contrastive(combined_batch)
+            metrics = cvae_trainer.train_step_pure_contrastive(combined_batch)
             
             # Check for NaN and skip if detected
             if torch.isnan(torch.tensor(metrics['total_loss'])):
