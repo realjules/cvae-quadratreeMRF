@@ -173,14 +173,22 @@ class EnhancedCVAE(nn.Module):
     @torch.no_grad()
     def update_queue(self, z_proj):
         """Update memory bank queue for contrastive learning"""
+        # The input z_proj should be detached before calling this method
         batch_size = z_proj.shape[0]
         ptr = int(self.queue_ptr)
         
+        # Ensure z_proj is on the same device as the queue
+        if z_proj.device != self.queue.device:
+            z_proj = z_proj.to(self.queue.device)
+
         if ptr + batch_size > self.queue.shape[0]:
-            first_part = self.queue.shape[0] - ptr
-            self.queue[ptr:] = z_proj[:first_part]
-            self.queue[:batch_size - first_part] = z_proj[first_part:]
-            ptr = batch_size - first_part
+            # Handle wrap-around
+            first_part_size = self.queue.shape[0] - ptr
+            second_part_size = batch_size - first_part_size
+            
+            self.queue[ptr:] = z_proj[:first_part_size]
+            self.queue[:second_part_size] = z_proj[first_part_size:]
+            ptr = second_part_size
         else:
             self.queue[ptr:ptr + batch_size] = z_proj
             ptr = (ptr + batch_size) % self.queue.shape[0]

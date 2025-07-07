@@ -117,9 +117,8 @@ class CVAETrainer:
         # Contrastive loss
         if self.use_memory_bank and hasattr(self.cvae, 'queue'):
             # MoCo-style loss
-            # Detach the queue to prevent in-place modification error during backprop
-            contrast_loss = contrastive_loss(z_proj1_norm, z_proj2_norm, self.temperature, self.cvae.queue.detach())
-            self.cvae.update_queue(z_proj1_norm.detach()) # Update queue
+            contrast_loss = contrastive_loss(z_proj1_norm, z_proj2_norm, self.temperature, self.cvae.queue)
+            self.cvae.update_queue(z_proj1_norm) # Update queue
         else:
             # SimCLR-style loss
             contrast_loss = simclr_loss_simple(z_proj1_norm, z_proj2_norm, self.temperature)
