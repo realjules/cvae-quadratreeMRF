@@ -114,6 +114,7 @@ class CVAETrainer:
         z_proj2_norm = F.normalize(z_proj2, dim=1)
 
         # Contrastive loss
+        # Contrastive loss
         if self.use_memory_bank and hasattr(self.cvae, 'queue'):
             # MoCo-style loss
             # Detach the queue to prevent in-place modification error during backprop
