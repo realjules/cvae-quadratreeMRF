@@ -1,22 +1,17 @@
 """
-Neural network models for Semi-Supervised Hierarchical PGM with Contrastive Learning
+Neural network modules for DHBP semi-supervised segmentation.
 
-This package contains:
-- EnhancedCVAE: Contrastive Variational Autoencoder for feature learning
-- MultiScaleSegmentationModel: Enhanced segmentation model with spatial reasoning
-- MultiScaleLoss: Multi-scale loss function with focal loss and boundary awareness
+- ContrastiveEncoder: ResNet-18 backbone + SimCLR projection head
+- DHBPModule: Differentiable Hierarchical Belief Propagation
+- SegmentationLoss: Focal + differentiable boundary loss
 """
 
-from .cvae import EnhancedCVAE, CVAE
-from .segmentation_model import MultiScaleSegmentationModel
-from .loss import MultiScaleLoss, SimpleCrossEntropyLoss, FocalLoss, BoundaryLoss
+from .cvae import ResNet18Encoder, SimCLRProjectionHead, ContrastiveEncoder
+from .dhbp import DHBPModule, UnaryPotentialHead, PairwisePotentialHead
+from .loss import FocalLoss, DifferentiableBoundaryLoss, SegmentationLoss
 
 __all__ = [
-    'EnhancedCVAE',
-    'CVAE',
-    'MultiScaleSegmentationModel', 
-    'MultiScaleLoss',
-    'SimpleCrossEntropyLoss',
-    'FocalLoss',
-    'BoundaryLoss'
+    'ResNet18Encoder', 'SimCLRProjectionHead', 'ContrastiveEncoder',
+    'DHBPModule', 'UnaryPotentialHead', 'PairwisePotentialHead',
+    'FocalLoss', 'DifferentiableBoundaryLoss', 'SegmentationLoss',
 ]
