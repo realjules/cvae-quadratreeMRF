@@ -319,7 +319,7 @@ def main():
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        mem_gb = torch.cuda.get_device_properties(0).total_mem / 1e9
+        mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
         print(f"GPU: {torch.cuda.get_device_name(0)} ({mem_gb:.1f} GB)")
 
     start_time = time.time()
