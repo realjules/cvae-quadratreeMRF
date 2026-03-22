@@ -1,625 +1,370 @@
-#!/usr/bin/env python3
 """
-Complete End-to-End Training Script for 90% Accuracy Target
+Complete end-to-end training pipeline for DHBP semi-supervised segmentation.
 
-This script implements the full pipeline:
-1. CVAE contrastive learning (unsupervised)
-2. Semi-supervised segmentation training
-3. Curriculum learning strategy
-4. Model evaluation and saving
+Stage 1: SimCLR contrastive pre-training on unlabeled ISPRS data
+Stage 2: Supervised segmentation with DHBP on labeled ISPRS data (10%)
+Stage 3: Evaluation on held-out test set
 
-Usage:
-    python complete_training.py --data_path ./input/ --target_accuracy 90 --labeled_percent 10
+Usage (local):
+    python complete_training.py --epochs_contrastive 50 --epochs_seg 50
+
+Usage (Kaggle):
+    python complete_training.py \
+        --data_dir /kaggle/input/your-dataset-name \
+        --output_dir /kaggle/working/output \
+        --epochs_contrastive 50 --epochs_seg 50
 """
 
-import torch
-import torch.nn as nn
 import argparse
+import glob
 import os
 import time
+
 import numpy as np
-from tqdm import tqdm
-from datetime import datetime, timedelta
+import torch
+from torch.utils.data import DataLoader
 
-# Import our fixed components
-from utils.cvae_trainer import CVAETrainer
-from utils.curriculum_learning import CurriculumTrainer, create_default_curriculum
-from train import FixedSegmentationTrainer
-from utils.contrastive_augmentations import ContrastiveAugmentation
-
-# Import real dataset classes
 from dataset.dataset import ISPRS_dataset
 from dataset.unsupervised_dataset import ISPRS_unsupervised_dataset
-from torch.utils.data import DataLoader
-import glob
+from net.cvae import ContrastiveEncoder
+from train import SegmentationTrainer
+from utils.cvae_trainer import ContrastiveTrainer
 
 
-def get_available_area_ids():
-    """
-    Auto-detect available area IDs from ISPRS data files
-    Returns IDs that have both top images and ground truth labels
-    """
-    # Get available top images
-    top_files = glob.glob("./input/top/top_mosaic_09cm_area*.tif")
-    gt_files = glob.glob("./input/gt/top_mosaic_09cm_area*.tif")
-    
-    # Extract area numbers
-    top_ids = []
-    for f in top_files:
-        area_part = f.split('area')[1].split('.')[0]
-        top_ids.append(area_part)
-    
-    gt_ids = []
-    for f in gt_files:
-        area_part = f.split('area')[1].split('.')[0]
-        gt_ids.append(area_part)
-    
-    # Only use IDs that have both top and ground truth
-    valid_ids = list(set(top_ids) & set(gt_ids))
-    valid_ids = sorted(valid_ids, key=lambda x: int(x))
-    
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
+
+def get_available_area_ids(data_dir="./input"):
+    """Auto-detect available area IDs from ISPRS data files."""
+    top_files = glob.glob(os.path.join(data_dir, "top", "top_mosaic_09cm_area*.tif"))
+    gt_files = glob.glob(os.path.join(data_dir, "gt", "top_mosaic_09cm_area*.tif"))
+
+    top_ids = [f.split('area')[1].split('.')[0] for f in top_files]
+    gt_ids = [f.split('area')[1].split('.')[0] for f in gt_files]
+
+    valid_ids = sorted(set(top_ids) & set(gt_ids), key=lambda x: int(x))
+    print(f"Data dir: {data_dir}")
     print(f"Found {len(top_ids)} top images, {len(gt_ids)} ground truth images")
     print(f"Valid IDs with both: {valid_ids}")
-    
     return valid_ids
 
 
 def split_dataset_ids(valid_ids, labeled_percent=10):
-    """
-    Split dataset IDs into train/unlabeled/test sets
-    """
-    total_ids = len(valid_ids)
-    
-    # For semi-supervised learning:
-    # - Use only labeled_percent% for supervised training
-    # - Use ALL data for unsupervised CVAE training
-    # - Use separate set for testing
-    
-    # Test set: last 20% of data
-    test_split = max(1, int(0.2 * total_ids))
+    """Split dataset IDs into labeled train / unlabeled train / test."""
+    total = len(valid_ids)
+
+    # Test: last 20%
+    test_split = max(1, int(0.2 * total))
     test_ids = valid_ids[-test_split:]
-    
-    # Remaining data for training
     train_pool = valid_ids[:-test_split]
-    
-    # Labeled data: only a small percentage
+
+    # Labeled: labeled_percent% of training pool
     labeled_count = max(1, int(labeled_percent / 100.0 * len(train_pool)))
     labeled_ids = train_pool[:labeled_count]
-    
-    # Unlabeled data: ALL training data (including labeled) for contrastive learning
+
+    # Unlabeled: ALL training data (for contrastive learning)
     unlabeled_ids = train_pool
-    
-    print(f"Dataset split (total {total_ids} areas):")
-    print(f"  Labeled training: {len(labeled_ids)} areas ({labeled_ids})")
-    print(f"  Unlabeled training: {len(unlabeled_ids)} areas (for contrastive learning)")
-    print(f"  Test: {len(test_ids)} areas ({test_ids})")
-    
+
+    print(f"Dataset split ({total} areas):")
+    print(f"  Labeled:   {len(labeled_ids)} areas {labeled_ids}")
+    print(f"  Unlabeled: {len(unlabeled_ids)} areas (for contrastive)")
+    print(f"  Test:      {len(test_ids)} areas {test_ids}")
     return labeled_ids, unlabeled_ids, test_ids
 
 
-def create_real_dataloaders(batch_size=2, labeled_percent=10, device="cuda"):
-    """
-    Create DataLoaders using real ISPRS dataset
-    """
-    # Get available data
-    valid_ids = get_available_area_ids()
-    if len(valid_ids) == 0:
-        raise ValueError("No valid ISPRS data found! Check ./input/top/ and ./input/gt/ directories")
-    
-    # Split dataset
+def create_real_dataloaders(data_dir="./input", batch_size=4,
+                            labeled_percent=10, device="cuda"):
+    """Create DataLoaders using real ISPRS dataset."""
+    valid_ids = get_available_area_ids(data_dir)
+    if not valid_ids:
+        raise ValueError(
+            f"No ISPRS data found in {data_dir}/top/ and {data_dir}/gt/\n"
+            f"  Expected: {data_dir}/top/top_mosaic_09cm_area*.tif\n"
+            f"  Expected: {data_dir}/gt/top_mosaic_09cm_area*.tif"
+        )
+
     labeled_ids, unlabeled_ids, test_ids = split_dataset_ids(valid_ids, labeled_percent)
-    
-    # Create datasets
-    print("Creating real ISPRS datasets...")
-    
-    # Unlabeled dataset for CVAE contrastive learning
+
+    top_pattern = os.path.join(data_dir, "top", "top_mosaic_09cm_area{}.tif")
+    gt_pattern = os.path.join(data_dir, "gt", "top_mosaic_09cm_area{}.tif")
+
     unlabeled_dataset = ISPRS_unsupervised_dataset(
         ids=unlabeled_ids,
-        data_files="./input/top/top_mosaic_09cm_area{}.tif",
+        data_files=top_pattern,
         window_size=256,
-        cache=False,  # Disable cache for Kaggle memory constraints
-        augmentation=True
+        cache=False,
+        augmentation=True,
     )
-    
-    # Labeled dataset for segmentation training
     labeled_dataset = ISPRS_dataset(
-        ids=labeled_ids,
-        ids_type='TRAIN',
-        gt_type='full',
-        gt_modification=None,
-        data_files="./input/top/top_mosaic_09cm_area{}.tif",
-        label_files="./input/gt/top_mosaic_09cm_area{}.tif",
-        window_size=256,
-        cache=False,
-        augmentation=True
+        ids=labeled_ids, ids_type='TRAIN', gt_type='full', gt_modification=None,
+        data_files=top_pattern,
+        label_files=gt_pattern,
+        window_size=256, cache=False, augmentation=True,
     )
-    
-    # Test dataset
     test_dataset = ISPRS_dataset(
-        ids=test_ids,
-        ids_type='TEST',
-        gt_type='full',
-        gt_modification=None,
-        data_files="./input/top/top_mosaic_09cm_area{}.tif",
-        label_files="./input/gt/top_mosaic_09cm_area{}.tif",
-        window_size=256,
-        cache=False,
-        augmentation=False
+        ids=test_ids, ids_type='TEST', gt_type='full', gt_modification=None,
+        data_files=top_pattern,
+        label_files=gt_pattern,
+        window_size=256, cache=False, augmentation=False,
     )
-    
-    # Create DataLoaders with Kaggle-optimized settings
+
+    # Kaggle: 2 workers + pin_memory. Local/CPU: 0 workers.
+    is_kaggle = os.path.exists("/kaggle")
+    loader_kwargs = dict(
+        num_workers=2 if is_kaggle else 0,
+        pin_memory=torch.cuda.is_available(),
+    )
+
     unlabeled_loader = DataLoader(
-        unlabeled_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,  # Avoid multiprocessing issues in Kaggle
-        pin_memory=False,  # Save memory
-        drop_last=True
+        unlabeled_dataset, batch_size=batch_size, shuffle=True,
+        drop_last=True, **loader_kwargs,
     )
-    
     labeled_loader = DataLoader(
-        labeled_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=False,
-        drop_last=True
+        labeled_dataset, batch_size=batch_size, shuffle=True,
+        drop_last=True, **loader_kwargs,
     )
-    
     test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=False,
-        drop_last=False
+        test_dataset, batch_size=batch_size, shuffle=False,
+        drop_last=False, **loader_kwargs,
     )
-    
-    print(f"✅ Real ISPRS DataLoaders created successfully!")
-    print(f"   Unlabeled: {len(unlabeled_dataset)} samples")
-    print(f"   Labeled: {len(labeled_dataset)} samples")
-    print(f"   Test: {len(test_dataset)} samples")
-    
+
+    print(f"DataLoaders: unlabeled={len(unlabeled_dataset)}, "
+          f"labeled={len(labeled_dataset)}, test={len(test_dataset)}")
     return unlabeled_loader, labeled_loader, test_loader
 
 
-def train_cvae_stage(cvae_trainer, unlabeled_dataloader, epochs=20, device="cuda"):
-    """
-    Stage 1: Train CVAE with contrastive learning on unlabeled ISPRS data
-    """
-    print("🎯 STAGE 1: CVAE Contrastive Learning (Real ISPRS Data)")
-    print("=" * 50)
-    
-    aug = ContrastiveAugmentation(size=256, strength=0.8)
-    
-    # Smart batch limiting to prevent infinite training
-    max_batches_per_epoch = min(200, len(unlabeled_dataloader))
-    print(f"   Processing {max_batches_per_epoch} batches per epoch (dataset has {len(unlabeled_dataloader)} total)")
-    
+# ---------------------------------------------------------------------------
+# Stage 1: Contrastive pre-training
+# ---------------------------------------------------------------------------
+
+def train_contrastive(trainer, dataloader, epochs, device, output_dir="./output"):
+    """Stage 1: SimCLR contrastive learning on unlabeled data."""
+    print("\n" + "=" * 60)
+    print("STAGE 1: SimCLR Contrastive Pre-training")
+    print("=" * 60)
+
+    max_batches = min(200, len(dataloader))
+
     for epoch in range(1, epochs + 1):
-        epoch_loss = 0
-        epoch_contrastive_loss = 0
-        epoch_recon_loss = 0
+        epoch_loss = 0.0
         num_batches = 0
-        
-        print(f"\n📚 CVAE Epoch {epoch}/{epochs}")
-        epoch_start_time = time.time()
-        
-        # Use real DataLoader with smart limiting
-        for batch_idx, (images, _) in enumerate(unlabeled_dataloader):
-            # SMART BATCH LIMITING: Prevent infinite training
-            if batch_idx >= max_batches_per_epoch:
-                print(f"   ✂️ Batch limit reached ({max_batches_per_epoch}), moving to next epoch")
+        epoch_start = time.time()
+
+        for batch_idx, (images, _) in enumerate(dataloader):
+            if batch_idx >= max_batches:
                 break
-            # Optimized contrastive augmentation - process batch directly
-            images = images.to(device)
-            
-            # Create two augmented views efficiently
-            view1_batch = []
-            view2_batch = []
-            
-            for i in range(images.size(0)):
-                view1, view2 = aug(images[i])
-                view1_batch.append(view1)
-                view2_batch.append(view2)
-            
-            # Stack views efficiently
-            view1_batch = torch.stack(view1_batch, dim=0).to(device)
-            view2_batch = torch.stack(view2_batch, dim=0).to(device)
-            
-            # Process both views together for efficiency
-            combined_batch = torch.cat([view1_batch, view2_batch], dim=0)
-            
-            # Train step with NaN detection
-            metrics = cvae_trainer.train_step_pure_contrastive(combined_batch)
-            
-            # Check for NaN and skip if detected
-            if torch.isnan(torch.tensor(metrics['total_loss'])):
-                print(f"  ⚠️  NaN detected at batch {batch_idx}, skipping...")
+
+            # Pass RAW images — augmentation happens inside train_step
+            metrics = trainer.train_step(images)
+
+            if np.isnan(metrics['total_loss']):
+                print(f"  NaN at batch {batch_idx}, skipping")
                 continue
-                
+
             epoch_loss += metrics['total_loss']
-            epoch_contrastive_loss += metrics['contrastive_loss']
-            epoch_recon_loss += metrics['recon_loss']
             num_batches += 1
-            
-            if batch_idx % 10 == 0:
-                # Calculate progress and time estimates
-                progress = (batch_idx + 1) / max_batches_per_epoch
-                elapsed_time = time.time() - epoch_start_time
-                eta_epoch = elapsed_time / progress if progress > 0 else 0
-                
-                print(f"  Batch {batch_idx+1}/{max_batches_per_epoch} ({progress*100:.1f}%) - "
-                      f"Total={metrics['total_loss']:.4f}, "
-                      f"Recon={metrics['recon_loss']:.4f}, "
-                      f"Contrastive={metrics['contrastive_loss']:.4f} - "
-                      f"ETA: {eta_epoch-elapsed_time:.0f}s")
-                
-                # Early stopping if loss becomes too high
-                if metrics['total_loss'] > 100.0:
-                    print(f"  ⚠️  Loss too high ({metrics['total_loss']:.2f}), reducing learning rate...")
-                    for param_group in cvae_trainer.optimizer.param_groups:
-                        param_group['lr'] *= 0.5
-                    print(f"  New learning rate: {param_group['lr']:.6f}")
-            
-            
-        
+
+            if batch_idx % 20 == 0:
+                elapsed = time.time() - epoch_start
+                print(f"  [{epoch}/{epochs}] batch {batch_idx+1}/{max_batches} "
+                      f"loss={metrics['total_loss']:.4f} ({elapsed:.0f}s)")
+
         avg_loss = epoch_loss / max(num_batches, 1)
-        avg_contrastive_loss = epoch_contrastive_loss / max(num_batches, 1)
-        avg_recon_loss = epoch_recon_loss / max(num_batches, 1)
-        
-        print(f"📊 CVAE Epoch {epoch} completed: Average Loss = {avg_loss:.4f}")
-        
-        # Create epoch metrics for best model tracking
-        epoch_metrics = {
-            'total_loss': avg_loss,
-            'contrastive_loss': avg_contrastive_loss,
-            'recon_loss': avg_recon_loss
-        }
-        
-        # Save best model if improved (based on contrastive loss)
-        saved_best = cvae_trainer.save_best_if_improved(epoch_metrics, epoch)
-        
-        # Additional saving strategies to ensure we don't lose good models
-        
-        # Strategy 1: Periodic checkpoint saving (every 5 epochs)
-        if epoch % 20 == 0:
-            cvae_trainer.save_model(f"./output/cvae_epoch_{epoch}.pth", epoch)
-            print(f"💾 Periodic checkpoint saved: epoch {epoch}")
-        
-        # Strategy 2: Save if contrastive loss is reasonably good (backup criterion)
-        if avg_contrastive_loss < 2.0 and not saved_best:  # Reasonable contrastive loss threshold
-            backup_path = f"./output/cvae_backup_epoch_{epoch}.pth"
-            cvae_trainer.save_model(backup_path, epoch)
-            print(f"💾 Backup model saved (good contrastive loss): {backup_path}")
-        
-        # Strategy 3: Always save the final epoch
+        trainer.scheduler.step()
+        print(f"Epoch {epoch}: avg_loss={avg_loss:.4f}")
+
+        # Save checkpoints
+        if avg_loss < trainer.best_loss:
+            trainer.best_loss = avg_loss
+            trainer.save(os.path.join(output_dir, "contrastive_best.pth"), epoch)
+            print(f"  New best contrastive model saved")
+
         if epoch == epochs:
-            final_path = "./output/cvae_final.pth"
-            cvae_trainer.save_model(final_path, epoch)
-            print(f"💾 Final model saved: {final_path}")
-    
-    print("✅ CVAE contrastive learning completed!")
-    return cvae_trainer
+            trainer.save(os.path.join(output_dir, "contrastive_final.pth"), epoch)
+
+    print("Stage 1 complete.\n")
+    return trainer
 
 
-def train_segmentation_stage(seg_trainer, labeled_dataloader, epochs=30, device="cuda"):
-    """
-    Stage 2: Train segmentation model on labeled ISPRS data
-    """
-    print("\n🎯 STAGE 2: Semi-Supervised Segmentation Training (Real ISPRS Data)")
-    print("=" * 50)
-    
-    best_loss = float('inf')
-    patience_counter = 0
-    max_patience = 5
-    
-    # Smart batch limiting for segmentation training
-    max_batches_per_epoch = min(100, len(labeled_dataloader))
-    print(f"   Processing {max_batches_per_epoch} batches per epoch (dataset has {len(labeled_dataloader)} total)")
-    
+# ---------------------------------------------------------------------------
+# Stage 2: Supervised segmentation
+# ---------------------------------------------------------------------------
+
+def train_segmentation(trainer, dataloader, test_loader, epochs, device,
+                       output_dir="./output"):
+    """Stage 2: Supervised segmentation with DHBP."""
+    print("=" * 60)
+    print("STAGE 2: Supervised Segmentation with DHBP")
+    print("=" * 60)
+
+    max_batches = min(100, len(dataloader))
+    best_acc = 0.0
+    patience = 0
+    max_patience = 10
+
     for epoch in range(1, epochs + 1):
-        epoch_loss = 0
+        epoch_loss = 0.0
         num_batches = 0
-        
-        print(f"\n📚 Segmentation Epoch {epoch}/{epochs}")
-        epoch_start_time = time.time()
-        
-        # Use real DataLoader with smart limiting
-        for batch_idx, (images, labels) in enumerate(labeled_dataloader):
-            # SMART BATCH LIMITING: Prevent infinite training
-            if batch_idx >= max_batches_per_epoch:
-                print(f"   ✂️ Batch limit reached ({max_batches_per_epoch}), moving to next epoch")
+        epoch_start = time.time()
+
+        for batch_idx, (images, labels) in enumerate(dataloader):
+            if batch_idx >= max_batches:
                 break
-            # Move to device
-            images = images.to(device)
-            labels = labels.to(device)
-            
-            # Training step
-            loss, loss_components, outputs = seg_trainer.train_step(images, labels)
-            
+
+            loss, components = trainer.train_step(images, labels)
             epoch_loss += loss
             num_batches += 1
-            
-            if batch_idx % 10 == 0:
-                # Calculate progress and time estimates
-                progress = (batch_idx + 1) / max_batches_per_epoch
-                elapsed_time = time.time() - epoch_start_time
-                eta_epoch = elapsed_time / progress if progress > 0 else 0
-                
-                # Check output quality
-                final_seg = outputs['final_segmentation']
-                pred_classes = torch.argmax(final_seg, dim=1)
-                
-                # Resize pred_classes to match labels if needed
-                if pred_classes.shape != labels.shape:
-                    pred_classes = torch.nn.functional.interpolate(
-                        pred_classes.unsqueeze(1).float(), 
-                        size=labels.shape[1:], 
-                        mode='nearest'
-                    ).squeeze(1).long()
-                
-                accuracy = (pred_classes == labels).float().mean()
-                
-                print(f"  Batch {batch_idx+1}/{max_batches_per_epoch} ({progress*100:.1f}%) - "
-                      f"Loss={loss:.4f}, Acc={accuracy:.3f} - "
-                      f"ETA: {eta_epoch-elapsed_time:.0f}s")
-            
-            
-        
+
+            if batch_idx % 20 == 0:
+                elapsed = time.time() - epoch_start
+                print(f"  [{epoch}/{epochs}] batch {batch_idx+1}/{max_batches} "
+                      f"loss={loss:.4f} ({elapsed:.0f}s)")
+
         avg_loss = epoch_loss / max(num_batches, 1)
-        print(f"📊 Segmentation Epoch {epoch} completed: Average Loss = {avg_loss:.4f}")
-        
-        # Early stopping with patience
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            patience_counter = 0
-            torch.save(seg_trainer.model.state_dict(), "./output/best_segmentation_model.pth")
-            print(f"💾 New best model saved! Loss: {best_loss:.4f}")
+        trainer.scheduler.step()
+
+        # Evaluate every 5 epochs (or last epoch)
+        if epoch % 5 == 0 or epoch == epochs:
+            metrics = trainer.evaluate(test_loader)
+            acc = metrics['accuracy']
+            print(f"Epoch {epoch}: loss={avg_loss:.4f}, acc={acc:.2f}%, "
+                  f"mean_class={metrics['mean_accuracy']:.2f}%")
+
+            if acc > best_acc:
+                best_acc = acc
+                trainer.save(os.path.join(output_dir, "best_segmentation.pth"))
+                print(f"  New best: {acc:.2f}%")
+                patience = 0
+            else:
+                patience += 1
+
+            if patience >= max_patience:
+                print(f"Early stopping after {patience} evals without improvement")
+                break
         else:
-            patience_counter += 1
-            print(f"   No improvement for {patience_counter} epochs")
-            
-            if patience_counter >= max_patience:
-                print(f"🛑 Early stopping triggered after {patience_counter} epochs without improvement")
-                break
-    
-    print("✅ Semi-supervised segmentation training completed!")
-    return seg_trainer
+            print(f"Epoch {epoch}: loss={avg_loss:.4f}")
+
+    print(f"Stage 2 complete. Best accuracy: {best_acc:.2f}%\n")
+    return trainer
 
 
-def evaluate_model(seg_trainer, test_dataloader, device="cuda"):
-    """
-    Evaluate the trained model on real ISPRS test data
-    """
-    print("\n🧪 EVALUATION (Real ISPRS Test Data)")
-    print("=" * 40)
-    
-    seg_trainer.model.eval()
-    total_accuracy = 0
-    total_samples = 0
-    class_correct = [0] * 6
-    class_total = [0] * 6
-    
-    # Smart evaluation limiting - use representative sample
-    max_eval_batches = min(50, len(test_dataloader))
-    print(f"   Evaluating on {max_eval_batches} batches (dataset has {len(test_dataloader)} total)")
-    
-    with torch.no_grad():
-        for batch_idx, (images, labels) in enumerate(test_dataloader):
-            # SMART EVALUATION LIMITING: Representative sample only
-            if batch_idx >= max_eval_batches:
-                print(f"   ✂️ Evaluation limit reached ({max_eval_batches} batches)")
-                break
-            # Move to device
-            images = images.to(device)
-            labels = labels.to(device)
-            
-            # Extract features and predict
-            features = seg_trainer.extract_cvae_features(images)
-            outputs = seg_trainer.model(features)
-            
-            final_seg = outputs['final_segmentation']
-            pred_classes = torch.argmax(final_seg, dim=1)
-            
-            # Resize pred_classes to match labels if needed
-            if pred_classes.shape != labels.shape:
-                pred_classes = torch.nn.functional.interpolate(
-                    pred_classes.unsqueeze(1).float(), 
-                    size=labels.shape[1:], 
-                    mode='nearest'
-                ).squeeze(1).long()
-            
-            # Overall accuracy
-            correct = (pred_classes == labels).float().sum()
-            total_accuracy += correct
-            total_samples += labels.numel()
-            
-            # Per-class accuracy
-            for c in range(6):
-                class_mask = (labels == c)
-                if class_mask.sum() > 0:
-                    class_correct[c] += (pred_classes[class_mask] == c).float().sum()
-                    class_total[c] += class_mask.sum()
-            
-            
-    
-    overall_accuracy = (total_accuracy / total_samples * 100).item()
-    
-    print(f"📊 EVALUATION RESULTS (Real ISPRS Data):")
-    print(f"Overall Accuracy: {overall_accuracy:.2f}%")
-    print(f"Class-wise Accuracy:")
+# ---------------------------------------------------------------------------
+# Stage 3: Evaluation
+# ---------------------------------------------------------------------------
+
+def evaluate_final(trainer, test_loader):
+    """Stage 3: Final evaluation with per-class breakdown."""
+    print("=" * 60)
+    print("STAGE 3: Final Evaluation")
+    print("=" * 60)
+
+    metrics = trainer.evaluate(test_loader)
     class_names = ["Impervious", "Buildings", "Low Veg", "Trees", "Cars", "Clutter"]
-    for i, name in enumerate(class_names):
-        if class_total[i] > 0:
-            acc = (class_correct[i] / class_total[i] * 100).item()
-            print(f"  {name}: {acc:.2f}%")
-    
-    return overall_accuracy
 
+    print(f"Overall Accuracy: {metrics['accuracy']:.2f}%")
+    print(f"Mean Class Accuracy: {metrics['mean_accuracy']:.2f}%")
+    print("Per-class:")
+    for name, acc in zip(class_names, metrics['per_class_accuracy']):
+        print(f"  {name}: {acc:.2f}%")
+
+    return metrics
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    """Complete training pipeline"""
-    parser = argparse.ArgumentParser(description='Complete Semi-Supervised Training')
-    parser.add_argument('--epochs_cvae', default=20, type=int, help='CVAE training epochs')
-    parser.add_argument('--epochs_seg', default=30, type=int, help='Segmentation training epochs')
-    parser.add_argument('--batch_size', default=4, type=int, help='Batch size')
-    parser.add_argument('--learning_rate', default=0.0001, type=float, help='Learning rate')
-    parser.add_argument('--labeled_percent', default=10, type=int, help='Percentage of labeled data')
-    parser.add_argument('--target_accuracy', default=90, type=float, help='Target accuracy')
-    parser.add_argument('--device', default='auto', help='Device (cuda/cpu/auto)')
-    parser.add_argument('--output_dir', default='./output/', help='Output directory')
-    
-    parser.add_argument('--temperature', default=0.1, type=float, help='Temperature for contrastive loss')
-    parser.add_argument('--kl_weight', default=0.1, type=float, help='Weight for KL divergence loss')
-    parser.add_argument('--kl_warmup_epochs', default=0, type=int, help='Number of epochs for KL warm-up')
-    parser.add_argument('--latent_dim', default=256, type=int, help='Latent dimension size')
-    parser.add_argument('--contrastive_weight', default=1.0, type=float, help='Weight for contrastive loss')
-
+    parser = argparse.ArgumentParser(description='DHBP Complete Training Pipeline')
+    parser.add_argument('--data_dir', default='./input',
+                        help='Root directory containing top/ and gt/ subdirectories. '
+                             'On Kaggle: /kaggle/input/<dataset-name>')
+    parser.add_argument('--output_dir', default='./output/',
+                        help='Directory for checkpoints and results. '
+                             'On Kaggle: /kaggle/working/output')
+    parser.add_argument('--epochs_contrastive', type=int, default=50)
+    parser.add_argument('--epochs_seg', type=int, default=50)
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--lr_contrastive', type=float, default=1e-3)
+    parser.add_argument('--lr_seg', type=float, default=1e-3)
+    parser.add_argument('--temperature', type=float, default=0.1)
+    parser.add_argument('--labeled_percent', type=int, default=10)
+    parser.add_argument('--device', default='auto')
     args = parser.parse_args()
-    
-    # Setup
+
     if args.device == 'auto':
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     else:
         device = torch.device(args.device)
-    
+
     os.makedirs(args.output_dir, exist_ok=True)
-    
-    print("🚀 COMPLETE SEMI-SUPERVISED TRAINING PIPELINE")
-    print("=" * 60)
+
+    print("DHBP Semi-Supervised Segmentation Pipeline")
     print(f"Device: {device}")
-    print(f"Target Accuracy: {args.target_accuracy}%")
-    print(f"Labeled Data: {args.labeled_percent}%")
-    print(f"CVAE Epochs: {args.epochs_cvae}")
-    print(f"Segmentation Epochs: {args.epochs_seg}")
-    print("=" * 60)
-    
-    # Create trainers with fixed hyperparameters
-    print("🔧 Initializing trainers...")
-    
-    # Fix 1: Lower learning rate for CVAE stability
-    cvae_lr = args.learning_rate * 0.1  # 10x lower for contrastive learning
-    seg_lr = args.learning_rate * 0.5   # 2x lower for segmentation
-    
-    # Stage 1: CVAE Training (no segmentation trainer needed)
-    if args.epochs_cvae > 0:
-        cvae_trainer = CVAETrainer(
-            device=device, 
-            learning_rate=cvae_lr,
-            temperature=args.temperature,
-            contrastive_weight=args.contrastive_weight,
-            kl_weight=args.kl_weight,
-            kl_warmup_epochs=args.kl_warmup_epochs,
-        )
-    
-    print(f"  CVAE Learning Rate: {cvae_lr}")
-    print(f"  Segmentation Learning Rate: {seg_lr}")
-    print(f"  Temperature: {args.temperature}")
-    
-    # Create real ISPRS data loaders
-    print("📊 Creating real ISPRS data loaders...")
-    
-    # Fix 2: Reduce batch sizes for memory efficiency
-    effective_batch_size = min(args.batch_size, 2)  # Max 2 for GPU memory
-    
-    try:
-        unlabeled_loader, labeled_loader, test_loader = create_real_dataloaders(
-            batch_size=effective_batch_size,
-            labeled_percent=args.labeled_percent,
-            device=device
-        )
-    except Exception as e:
-        print(f"❌ Failed to create real data loaders: {e}")
-        print("Please ensure ISPRS data is properly linked in ./input/ directories")
-        return 1
-    
-    print(f"  Effective Batch Size: {effective_batch_size} (reduced for memory)")
-    print(f"  GPU Memory Available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-    
-    # Clear any existing GPU memory
+    print(f"Data dir: {args.data_dir}")
+    print(f"Output dir: {args.output_dir}")
+    print(f"Labeled data: {args.labeled_percent}%")
+    print(f"Contrastive epochs: {args.epochs_contrastive}")
+    print(f"Segmentation epochs: {args.epochs_seg}")
+
+    # Create dataloaders
+    effective_batch = min(args.batch_size, 4)
+    unlabeled_loader, labeled_loader, test_loader = create_real_dataloaders(
+        data_dir=args.data_dir,
+        batch_size=effective_batch,
+        labeled_percent=args.labeled_percent,
+        device=device,
+    )
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        print(f"  GPU Memory Cleared")
-    
-    # Training pipeline
+        mem_gb = torch.cuda.get_device_properties(0).total_mem / 1e9
+        print(f"GPU: {torch.cuda.get_device_name(0)} ({mem_gb:.1f} GB)")
+
     start_time = time.time()
-    
-    try:
-        # Stage 1: CVAE Contrastive Learning on real ISPRS data
-        if args.epochs_cvae > 0:
-            cvae_trainer = train_cvae_stage(cvae_trainer, unlabeled_loader, args.epochs_cvae, device)
-            
-            # Clear GPU memory before next stage
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                print("🧹 GPU memory cleared between stages")
-        
-        # Stage 2: Initialize Segmentation Trainer (AFTER CVAE is trained)
-        if args.epochs_seg > 0:
-            # Try multiple CVAE model paths (in order of preference)
-            cvae_model_candidates = [
-                "./output/cvae_final.pth",          # Final model (backup)
-                "./output/cvae_best.pth",           # Best contrastive model (preferred)
-                "./output/cvae_epoch_20.pth",       # Late epoch checkpoint
-                "./output/cvae_epoch_15.pth",       # Mid-late epoch checkpoint
-                "./output/cvae_epoch_10.pth",       # Mid epoch checkpoint
-            ]
-            
-            # Find the best available CVAE model
-            cvae_path = None
-            for candidate in cvae_model_candidates:
-                if os.path.exists(candidate):
-                    cvae_path = candidate
-                    print(f"🎯 Using CVAE model: {candidate}")
-                    break
-            
-            if cvae_path is None:
-                print("❌ No CVAE model found! Please run CVAE training first.")
-                print("   Command: python complete_training.py --epochs_cvae 20 --epochs_seg 0")
-                return 1
-            
-            # NOW create segmentation trainer with trained CVAE
-            seg_trainer = FixedSegmentationTrainer(
-                cvae_path=cvae_path,  # Use best available CVAE model
-                learning_rate=seg_lr,
-                device=device
-            )
-            
-            # Stage 3: Segmentation Training
-            seg_trainer = train_segmentation_stage(seg_trainer, labeled_loader, args.epochs_seg, device)
-        
-        # Stage 4: Evaluation on real ISPRS test data
-        if args.epochs_seg > 0:
-            final_accuracy = evaluate_model(seg_trainer, test_loader, device)
-        else:
-            final_accuracy = 0.0  # No segmentation training, no accuracy to report
-        
-        # Results
-        total_time = time.time() - start_time
-        print(f"\n🎉 TRAINING COMPLETED!")
-        print("=" * 40)
-        print(f"Final Accuracy: {final_accuracy:.2f}%")
-        print(f"Target Accuracy: {args.target_accuracy}%")
-        print(f"Total Time: {total_time:.1f} seconds")
-        
-        if final_accuracy >= args.target_accuracy:
-            print("🏆 TARGET ACHIEVED!")
-        else:
-            print(f"📈 Progress: {final_accuracy:.1f}% / {args.target_accuracy}%")
-        
-        print(f"\n💾 Models saved to: {args.output_dir}")
-        print("🚀 Ready for real dataset training!")
-        
-        return 0 if final_accuracy >= args.target_accuracy else 1
-        
-    except Exception as e:
-        print(f"❌ Training failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
+
+    # Stage 1: Contrastive pre-training
+    encoder = ContrastiveEncoder(pretrained=True)
+    contrastive_trainer = ContrastiveTrainer(
+        encoder=encoder,
+        learning_rate=args.lr_contrastive,
+        temperature=args.temperature,
+        device=str(device),
+    )
+
+    if args.epochs_contrastive > 0:
+        contrastive_trainer = train_contrastive(
+            contrastive_trainer, unlabeled_loader, args.epochs_contrastive,
+            device, output_dir=args.output_dir,
+        )
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # Stage 2: Segmentation with DHBP
+    # Pass the encoder object directly — no checkpoint file searching
+    seg_trainer = SegmentationTrainer(
+        encoder=contrastive_trainer.encoder,
+        n_classes=6,
+        learning_rate=args.lr_seg,
+        device=str(device),
+    )
+
+    if args.epochs_seg > 0:
+        seg_trainer = train_segmentation(
+            seg_trainer, labeled_loader, test_loader, args.epochs_seg,
+            device, output_dir=args.output_dir,
+        )
+
+    # Stage 3: Final evaluation
+    final_metrics = evaluate_final(seg_trainer, test_loader)
+
+    total_time = time.time() - start_time
+    print(f"\nTotal time: {total_time:.0f}s ({total_time/60:.1f}min)")
+    print(f"Final accuracy: {final_metrics['accuracy']:.2f}%")
+
+    return 0 if final_metrics['accuracy'] >= 90.0 else 1
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    exit(exit_code)
+    exit(main())

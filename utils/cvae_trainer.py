@@ -1,455 +1,123 @@
 """
-CVAE Training Integration for Semi-Supervised Learning
+SimCLR Contrastive Trainer for pre-training the ResNet-18 encoder
+on unlabeled ISPRS aerial imagery.
 
-This module provides proper training integration for the CVAE with:
-1. Contrastive learning on unlabeled data
-2. Feature extraction for segmentation
-3. Proper loss combinations
+Pipeline:
+    raw images → augment (exactly once) → encoder.project() → SimCLR loss
+
+No MoCo, no reconstruction, no VAE. Simple and proven.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from tqdm import tqdm
 import os
 
-from net.cvae import EnhancedCVAE
-from utils.losses import contrastive_loss, simclr_loss_simple
-from utils.contrastive_augmentations import ContrastiveAugmentation, create_contrastive_pair
+from net.cvae import ContrastiveEncoder
+from utils.losses import simclr_loss_simple
+from utils.contrastive_augmentations import ContrastiveAugmentation
 
 
-class CVAETrainer:
+class ContrastiveTrainer:
+    """SimCLR contrastive pre-training for the ResNet-18 encoder.
+
+    Key design decisions:
+        - Augmentation applied exactly once inside train_step() (fixes double-aug bug)
+        - Uses simclr_loss_simple from utils/losses.py (proven correct)
+        - Consistent save/load format: {encoder_state_dict, optimizer_state_dict, epoch}
     """
-    Trainer for CVAE with contrastive learning and semi-supervised integration
-    """
-    
-    def __init__(self, 
-                 input_channels=3, 
-                 latent_dim=256, 
-                 hidden_dims=None,
-                 learning_rate=1e-4,
-                 device="cuda",
-                 temperature=0.07,
-                 kl_weight=0.1,
-                 contrastive_weight=1.0,
-                 kl_warmup_epochs=0,
-                 use_memory_bank=True):
-        
+
+    def __init__(
+        self,
+        encoder: ContrastiveEncoder | None = None,
+        learning_rate: float = 1e-3,
+        temperature: float = 0.1,
+        device: str = 'cuda',
+    ):
         self.device = device
         self.temperature = temperature
-        self.use_memory_bank = use_memory_bank
-        
-        # Initialize CVAE
-        if hidden_dims is None:
-            hidden_dims = [64, 128, 256]
-        
-        self.cvae = EnhancedCVAE(
-            input_channels=input_channels,
-            latent_dim=latent_dim, 
-            hidden_dims=hidden_dims
-        ).to(device)
-        
-        # Optimizer for CVAE
+
+        if encoder is None:
+            encoder = ContrastiveEncoder(pretrained=True)
+        self.encoder = encoder.to(device)
+
         self.optimizer = torch.optim.AdamW(
-            self.cvae.parameters(),
-            lr=learning_rate,
-            weight_decay=1e-5
+            self.encoder.parameters(), lr=learning_rate, weight_decay=1e-4
         )
-        
-        # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer, T_max=100, eta_min=1e-6
         )
-        
-        # Augmentation pipeline
-        self.contrastive_aug = ContrastiveAugmentation(size=256, strength=0.8)
-        
-        # Loss weights
-        self.recon_weight = 1.0
-        self.kl_weight = kl_weight
-        self.kl_warmup_epochs = kl_warmup_epochs
-        self.beta = 0.0 if kl_warmup_epochs > 0 else 1.0
-        self.contrastive_weight = contrastive_weight
-        
-        # Metrics tracking
-        self.metrics = {
-            'recon_loss': [],
-            'kl_loss': [],
-            'contrastive_loss': [],
-            'total_loss': []
-        }
-        
-        # Best model tracking
-        self.best_contrastive_loss = float('inf')
-        self.best_model_path = "./output/cvae_best.pth"
-        
-    def train_step_pure_contrastive(self, batch_images):
-        """
-        Training step focused on PURE contrastive learning (SimCLR/MoCo style).
-        This is the new method for our experiment.
-        """
-        self.cvae.train()
-        batch_size = batch_images.size(0)
+        self.augmentation = ContrastiveAugmentation(size=256, strength=0.8)
+        self.best_loss = float('inf')
 
-        # Generate augmented pairs for contrastive learning
-        view1_batch = []
-        view2_batch = []
-        for i in range(batch_size):
-            image = batch_images[i]
-            view1, view2 = self.contrastive_aug(image)
-            view1_batch.append(view1)
-            view2_batch.append(view2)
+    def train_step(self, images: torch.Tensor) -> dict:
+        """Single SimCLR training step.
 
-        view1_batch = torch.stack(view1_batch).to(self.device)
-        view2_batch = torch.stack(view2_batch).to(self.device)
-
-        # Forward pass through CVAE for both views
-        outputs1 = self.cvae(view1_batch)
-        outputs2 = self.cvae(view2_batch, x_key=view1_batch) # Pass view1 as key for view2
-
-        z_proj1_norm = outputs1['z_proj_q']
-        z_proj2_norm = outputs2['z_proj_q']
-        z_proj_k_for_queue = outputs2['z_proj_k'] # Features from key encoder for queue
-
-        # Contrastive loss
-        if self.use_memory_bank and hasattr(self.cvae, 'queue'):
-            # MoCo-style loss
-            contrast_loss = contrastive_loss(z_proj1_norm, z_proj2_norm, self.temperature, self.cvae.queue)
-            self.cvae.update_queue(z_proj_k_for_queue) # Update queue with key encoder features
-        else:
-            # SimCLR-style loss
-            contrast_loss = simclr_loss_simple(z_proj1_norm, z_proj2_norm, self.temperature)
-
-        # The loss is ONLY the contrastive loss
-        total_loss = self.contrastive_weight * contrast_loss
-
-        # Backward pass
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.cvae.parameters(), max_norm=1.0)
-        self.optimizer.step()
-
-        return {
-            'total_loss': total_loss.item(),
-            'recon_loss': 0,  # Not used
-            'kl_loss': 0,  # Not used
-            'contrastive_loss': contrast_loss.item(),
-            'batch_size': batch_size
-        }
-
-    def train_epoch_contrastive(self, dataloader, epoch):
-        """
-        This is the main entry point for training. For our experiment,
-        it will now call the 'pure' contrastive learning epoch.
-        """
-        return self.train_epoch_pure_contrastive(dataloader, epoch)
-
-    def train_epoch_pure_contrastive(self, dataloader, epoch):
-        """Train one epoch with PURE contrastive learning"""
-        self.cvae.train()
-        epoch_metrics = {'total_loss': 0, 'recon_loss': 0, 'kl_loss': 0, 'contrastive_loss': 0, 'count': 0}
-        
-        progress_bar = tqdm(dataloader, desc=f"CVAE Pure Contrastive Epoch {epoch}")
-        
-        for batch_idx, (images, _) in enumerate(progress_bar):
-            images = images.to(self.device)
-            
-            # Use the new pure contrastive training step
-            metrics = self.train_step_pure_contrastive(images)
-            
-            # Update epoch metrics
-            for key in ['total_loss', 'contrastive_loss']:
-                epoch_metrics[key] += metrics[key] * metrics['batch_size']
-            epoch_metrics['count'] += metrics['batch_size']
-            
-            # Update progress bar
-            progress_bar.set_postfix({
-                'Loss': f"{metrics['total_loss']:.4f}",
-                'Contrast': f"{metrics['contrastive_loss']:.4f}"
-            })
-        
-        # Calculate average metrics
-        for key in ['total_loss', 'contrastive_loss']:
-            epoch_metrics[key] /= epoch_metrics['count']
-            self.metrics[key].append(epoch_metrics[key])
-        
-        # Step scheduler
-        self.scheduler.step()
-        
-        return epoch_metrics
-
-    def train_step_hybrid_contrastive(self, batch_images):
-        """
-        This is the original hybrid training step, preserved for comparison.
-        It combines VAE and contrastive losses.
-        """
-        self.cvae.train()
-        batch_size = batch_images.size(0)
-        
-        # Generate augmented pairs for contrastive learning
-        view1_batch = []
-        view2_batch = []
-        
-        for i in range(batch_size):
-            image = batch_images[i]
-            view1, view2 = self.contrastive_aug(image)
-            view1_batch.append(view1)
-            view2_batch.append(view2)
-        
-        view1_batch = torch.stack(view1_batch).to(self.device)
-        view2_batch = torch.stack(view2_batch).to(self.device)
-        
-        # Forward pass through CVAE for both views
-        outputs1 = self.cvae(view1_batch)
-        outputs2 = self.cvae(view2_batch)
-        
-        # Extract components
-        recon1, mu1, log_var1 = outputs1['reconstruction'], outputs1['mu'], outputs1['log_var']
-        recon2, mu2, log_var2 = outputs2['reconstruction'], outputs2['mu'], outputs2['log_var']
-        z_proj1, z_proj2 = outputs1['z_proj'], outputs2['z_proj']
-        
-        # 1. Reconstruction loss
-        recon_loss1 = F.mse_loss(recon1, view1_batch)
-        recon_loss2 = F.mse_loss(recon2, view2_batch)
-        recon_loss = (recon_loss1 + recon_loss2) / 2
-        
-        # 2. KL divergence loss
-        kl_loss1 = -0.5 * torch.sum(1 + log_var1 - mu1.pow(2) - log_var1.exp(), dim=1).mean()
-        kl_loss2 = -0.5 * torch.sum(1 + log_var2 - mu2.pow(2) - log_var2.exp(), dim=1).mean()
-        kl_loss = (kl_loss1 + kl_loss2) / 2
-        
-        # 3. Contrastive loss
-        if self.use_memory_bank and hasattr(self.cvae, 'queue'):
-            queue = self.cvae.queue
-            if queue.size(1) == z_proj1.size(1):
-                contrast_loss = contrastive_loss(z_proj1, z_proj2, self.temperature, queue)
-            else:
-                print(f"⚠️  Queue dimension mismatch: using simple contrastive loss")
-                contrast_loss = simclr_loss_simple(z_proj1, z_proj2, self.temperature)
-        else:
-            contrast_loss = simclr_loss_simple(z_proj1, z_proj2, self.temperature)
-        
-        # Total loss with KL warm-up
-        total_loss = (self.recon_weight * recon_loss + 
-                     self.beta * self.kl_weight * kl_loss + 
-                     self.contrastive_weight * contrast_loss)
-        
-        # Backward pass
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.cvae.parameters(), max_norm=1.0)
-        self.optimizer.step()
-        
-        return {
-            'total_loss': total_loss.item(),
-            'recon_loss': recon_loss.item(),
-            'kl_loss': kl_loss.item(),
-            'contrastive_loss': contrast_loss.item(),
-            'batch_size': batch_size
-        }
-    
-    def train_step_reconstruction(self, batch_images):
-        """
-        Training step focused on reconstruction (can be used with limited labeled data)
-        
         Args:
-            batch_images: [B, C, H, W] batch of images
-            
-        Returns:
-            dict: Loss components and metrics  
-        """
-        self.cvae.train()
-        
-        # Forward pass
-        outputs = self.cvae(batch_images)
-        recon, mu, log_var = outputs['reconstruction'], outputs['mu'], outputs['log_var']
-        
-        # 1. Reconstruction loss
-        recon_loss = F.mse_loss(recon, batch_images)
-        
-        # 2. KL divergence loss  
-        kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1).mean()
-        
-        # Total loss (no contrastive component)
-        total_loss = self.recon_weight * recon_loss + self.kl_weight * kl_loss
-        
-        # Backward pass
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.cvae.parameters(), max_norm=1.0)
-        self.optimizer.step()
-        
-        return {
-            'total_loss': total_loss.item(),
-            'recon_loss': recon_loss.item(), 
-            'kl_loss': kl_loss.item(),
-            'contrastive_loss': 0.0,
-            'batch_size': batch_images.size(0)
-        }
-    
-    def extract_features(self, images):
-        """
-        Extract multi-scale features for segmentation
-        
-        Args:
-            images: [B, C, H, W] input images
-            
-        Returns:
-            dict: Multi-scale features for segmentation model
-        """
-        self.cvae.eval()
-        with torch.no_grad():
-            # Get encoder features (this is what we need for segmentation)
-            mu, log_var, encoder_features = self.cvae.encode(images)
-            
-            # encoder_features contains [feat_l1, feat_l2, feat_l3]
-            # feat_l1: [B, 64, 128, 128] - fine details
-            # feat_l2: [B, 128, 64, 64] - medium features  
-            # feat_l3: [B, 256, 32, 32] - semantic features
-            
-            return {
-                'p1': encoder_features[0],  # Fine level
-                'p2': encoder_features[1],  # Medium level
-                'p3': encoder_features[2],  # Coarse level
-                'global_context': encoder_features[2],  # Use coarse as global context
-                'latent_mu': mu,
-                'latent_log_var': log_var
-            }
-    
-    def train_epoch_hybrid_contrastive(self, dataloader, epoch):
-        """This is the original CVAE Contrastive Epoch, preserved for comparison."""
-        self.cvae.train()
-        epoch_metrics = {'total_loss': 0, 'recon_loss': 0, 'kl_loss': 0, 'contrastive_loss': 0, 'count': 0}
-        
-        progress_bar = tqdm(dataloader, desc=f"CVAE Hybrid Contrastive Epoch {epoch}")
-        
-        for batch_idx, (images, _) in enumerate(progress_bar):
-            images = images.to(self.device)
-            
-            # Original hybrid training step
-            metrics = self.train_step_hybrid_contrastive(images)
-            
-            # Update epoch metrics
-            for key in ['total_loss', 'recon_loss', 'kl_loss', 'contrastive_loss']:
-                epoch_metrics[key] += metrics[key] * metrics['batch_size']
-            epoch_metrics['count'] += metrics['batch_size']
-            
-            # Update progress bar
-            progress_bar.set_postfix({
-                'Loss': f"{metrics['total_loss']:.4f}",
-                'Recon': f"{metrics['recon_loss']:.4f}", 
-                'KL': f"{metrics['kl_loss']:.4f}",
-                'Contrast': f"{metrics['contrastive_loss']:.4f}"
-            })
-        
-        # Calculate average metrics
-        for key in ['total_loss', 'recon_loss', 'kl_loss', 'contrastive_loss']:
-            epoch_metrics[key] /= epoch_metrics['count']
-            self.metrics[key].append(epoch_metrics[key])
-        
-        # Update KL warm-up beta
-        if self.kl_warmup_epochs > 0:
-            self.beta = min(1.0, epoch / self.kl_warmup_epochs)
+            images: [B, 3, 256, 256] raw images (NOT pre-augmented).
+                    Augmentation is applied exactly once here.
 
-        # Step scheduler
-        self.scheduler.step()
-        
-        return epoch_metrics
-    
-    def save_model(self, path, epoch, metrics=None):
-        """Save CVAE model and training state"""
-        checkpoint = {
+        Returns:
+            dict with 'total_loss' and 'contrastive_loss'
+        """
+        self.encoder.train()
+        B = images.size(0)
+
+        # Create two augmented views (augmentation applied ONCE, here)
+        view1_list, view2_list = [], []
+        for i in range(B):
+            v1, v2 = self.augmentation(images[i])
+            view1_list.append(v1)
+            view2_list.append(v2)
+
+        view1 = torch.stack(view1_list).to(self.device)
+        view2 = torch.stack(view2_list).to(self.device)
+
+        # Project both views
+        z1 = self.encoder.project(view1)  # [B, proj_dim]
+        z2 = self.encoder.project(view2)  # [B, proj_dim]
+
+        # SimCLR loss
+        loss = simclr_loss_simple(z1, z2, self.temperature)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), max_norm=1.0)
+        self.optimizer.step()
+
+        return {
+            'total_loss': loss.item(),
+            'contrastive_loss': loss.item(),
+        }
+
+    def save(self, path: str, epoch: int):
+        """Save encoder and optimizer state.
+
+        Format: {epoch, encoder_state_dict, optimizer_state_dict}
+        This is the ONLY save format — no ambiguity, no mismatch.
+        """
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        torch.save({
             'epoch': epoch,
-            'model_state_dict': self.cvae.state_dict(),
+            'encoder_state_dict': self.encoder.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'metrics': self.metrics,
-            'config': {
-                'latent_dim': self.cvae.latent_dim,
-                'hidden_dims': self.cvae.hidden_dims,
-                'input_channels': self.cvae.input_channels,
-                'temperature': self.temperature,
-                'use_memory_bank': self.use_memory_bank
-            }
-        }
-        
-        if metrics is not None:
-            checkpoint['epoch_metrics'] = metrics
-            
-        torch.save(checkpoint, path)
-        print(f"✅ CVAE model saved to {path}")
-    
-    def save_best_if_improved(self, current_metrics, epoch):
-        """Save model if contrastive loss improved"""
-        current_contrastive_loss = current_metrics['contrastive_loss']
-        
-        print(f"   📊 Contrastive loss: {current_contrastive_loss:.4f} (best: {self.best_contrastive_loss:.4f})")
-        
-        if current_contrastive_loss < self.best_contrastive_loss:
-            improvement = self.best_contrastive_loss - current_contrastive_loss
-            self.best_contrastive_loss = current_contrastive_loss
-            self.save_model(self.best_model_path, epoch, current_metrics)
-            print(f"🏆 NEW BEST CVAE MODEL! Epoch {epoch}")
-            print(f"   ✅ Contrastive loss improved by {improvement:.4f}")
-            print(f"   💾 Saved to: {self.best_model_path}")
-            return True
-        else:
-            print(f"   📈 No improvement in contrastive loss")
-            return False
-    
-    def load_model(self, path):
-        """Load CVAE model and training state"""
+        }, path)
+
+    def load(self, path: str) -> int:
+        """Load encoder and optimizer state.
+
+        Args:
+            path: checkpoint file path
+
+        Returns:
+            epoch number from checkpoint
+
+        Raises:
+            FileNotFoundError: if path doesn't exist
+        """
         if not os.path.exists(path):
-            print(f"❌ Model file {path} does not exist")
-            return False
-            
-        try:
-            checkpoint = torch.load(path, map_location=self.device)
-            
-            self.cvae.load_state_dict(checkpoint['model_state_dict'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            self.metrics = checkpoint.get('metrics', self.metrics)
-            
-            epoch = checkpoint.get('epoch', 0)
-            print(f"✅ CVAE model loaded from {path} (epoch {epoch})")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error loading model: {e}")
-            return False
-
-
-def test_cvae_trainer():
-    """Test function to verify CVAE trainer works correctly"""
-    print("Testing CVAE Trainer...")
-    
-    # Create trainer
-    trainer = CVAETrainer(device="cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Create dummy data
-    batch_size = 4
-    dummy_images = torch.randn(batch_size, 3, 256, 256)
-    
-    if torch.cuda.is_available():
-        dummy_images = dummy_images.cuda()
-    
-    # Test contrastive training step
-    print("Testing contrastive training step...")
-    metrics = trainer.train_step_contrastive(dummy_images)
-    print(f"✅ Contrastive step metrics: {metrics}")
-    
-    # Test feature extraction
-    print("Testing feature extraction...")
-    features = trainer.extract_features(dummy_images)
-    print(f"✅ Extracted features shapes:")
-    for key, feat in features.items():
-        if isinstance(feat, torch.Tensor):
-            print(f"  {key}: {feat.shape}")
-    
-    print("✅ CVAE Trainer test passed!")
-
-
-if __name__ == "__main__":
-    test_cvae_trainer()
+            raise FileNotFoundError(f"Checkpoint not found: {path}")
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        self.encoder.load_state_dict(ckpt['encoder_state_dict'])
+        self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        return ckpt.get('epoch', 0)
