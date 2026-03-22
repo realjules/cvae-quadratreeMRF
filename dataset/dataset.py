@@ -55,9 +55,9 @@ class ISPRS_dataset(torch.utils.data.Dataset):
                 A.RandomRotate90(p=0.5),
                 A.Transpose(p=0.5),
                 A.OneOf([
-                    A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
+                    A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05),
                     A.GridDistortion(p=0.5),
-                    A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=1),
+                    A.OpticalDistortion(distort_limit=1, p=1),
                 ], p=0.8),
                 A.RandomBrightnessContrast(p=0.8),
                 A.RandomGamma(p=0.8),
