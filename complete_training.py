@@ -198,10 +198,10 @@ def train_segmentation(trainer, dataloader, test_loader, epochs, device,
     print("STAGE 2: Supervised Segmentation with DHBP")
     print("=" * 60)
 
-    max_batches = min(100, len(dataloader))
     best_acc = 0.0
     patience = 0
-    max_patience = 10
+    max_patience = 15
+    total_batches = len(dataloader)
 
     for epoch in range(1, epochs + 1):
         epoch_loss = 0.0
@@ -209,16 +209,13 @@ def train_segmentation(trainer, dataloader, test_loader, epochs, device,
         epoch_start = time.time()
 
         for batch_idx, (images, labels) in enumerate(dataloader):
-            if batch_idx >= max_batches:
-                break
-
             loss, components = trainer.train_step(images, labels)
             epoch_loss += loss
             num_batches += 1
 
-            if batch_idx % 20 == 0:
+            if batch_idx % 50 == 0:
                 elapsed = time.time() - epoch_start
-                print(f"  [{epoch}/{epochs}] batch {batch_idx+1}/{max_batches} "
+                print(f"  [{epoch}/{epochs}] batch {batch_idx+1}/{total_batches} "
                       f"loss={loss:.4f} ({elapsed:.0f}s)")
 
         avg_loss = epoch_loss / max(num_batches, 1)
