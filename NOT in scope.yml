@@ -1,0 +1,18 @@
+NOT in scope
+
+ - Multiple BP iterations (single pass is exact on tree — no loops)
+ - Adaptive quadtree depth
+ - Loopy BP for within-level (horizontal) connections
+ - Changes to any file other than net/dhbp.py
+
+
+Done. The only change is adding --data_dir and --output_dir arguments and threading them through the data loading and checkpoint saving functions.
+
+On your Kaggle notebook, run:
+
+python complete_training.py --data_dir /kaggle/input/YOUR-DATASET-NAME --output_dir /kaggle/working/output --epochs_contrastive 50 --epochs_seg 50 --batch_size 4
+
+Replace YOUR-DATASET-NAME with whatever your ISPRS dataset is called on Kaggle. The data directory must contain top/ and gt/ subdirectories with the ISPRS
+   .tif files.
+
+  What's the name of your Kaggle dataset so I can give you the exact command?

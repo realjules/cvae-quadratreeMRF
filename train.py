@@ -74,7 +74,7 @@ class SegmentationTrainer:
         self.dhbp.train()
 
         images = images.to(self.device)
-        labels = labels.to(self.device)
+        labels = labels.to(self.device).long()
 
         # Extract multi-scale features (encoder IS fine-tuned)
         p1, p2, p3 = self.encoder.encode(images)
@@ -142,7 +142,7 @@ class SegmentationTrainer:
 
         for images, labels in dataloader:
             images = images.to(self.device)
-            labels = labels.to(self.device)
+            labels = labels.to(self.device).long()
 
             preds = self.predict(images)
 

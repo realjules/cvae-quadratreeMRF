@@ -290,6 +290,10 @@ def main():
     parser.add_argument('--lr_seg', type=float, default=1e-3)
     parser.add_argument('--temperature', type=float, default=0.1)
     parser.add_argument('--labeled_percent', type=int, default=10)
+    parser.add_argument('--contrastive_ckpt', default=None,
+                        help='Path to a pre-trained contrastive checkpoint. '
+                             'If provided, Stage 1 is skipped and the encoder '
+                             'is loaded from this file.')
     parser.add_argument('--device', default='auto')
     args = parser.parse_args()
 
@@ -324,27 +328,41 @@ def main():
 
     start_time = time.time()
 
-    # Stage 1: Contrastive pre-training
+    # Stage 1: Contrastive pre-training (or load from checkpoint)
     encoder = ContrastiveEncoder(pretrained=True)
-    contrastive_trainer = ContrastiveTrainer(
-        encoder=encoder,
-        learning_rate=args.lr_contrastive,
-        temperature=args.temperature,
-        device=str(device),
-    )
 
-    if args.epochs_contrastive > 0:
-        contrastive_trainer = train_contrastive(
-            contrastive_trainer, unlabeled_loader, args.epochs_contrastive,
-            device, output_dir=args.output_dir,
+    if args.contrastive_ckpt:
+        print(f"\nLoading contrastive encoder from: {args.contrastive_ckpt}")
+        ckpt_path = args.contrastive_ckpt
+        # Handle Kaggle model directory — find the .pth file inside
+        if os.path.isdir(ckpt_path):
+            pth_files = glob.glob(os.path.join(ckpt_path, "*.pth"))
+            if not pth_files:
+                raise FileNotFoundError(f"No .pth files found in {ckpt_path}")
+            ckpt_path = pth_files[0]
+            print(f"  Found checkpoint: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        encoder.load_state_dict(ckpt['encoder_state_dict'])
+        print(f"  Encoder loaded (epoch {ckpt.get('epoch', '?')}). Skipping Stage 1.")
+    else:
+        contrastive_trainer = ContrastiveTrainer(
+            encoder=encoder,
+            learning_rate=args.lr_contrastive,
+            temperature=args.temperature,
+            device=str(device),
         )
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if args.epochs_contrastive > 0:
+            contrastive_trainer = train_contrastive(
+                contrastive_trainer, unlabeled_loader, args.epochs_contrastive,
+                device, output_dir=args.output_dir,
+            )
+            encoder = contrastive_trainer.encoder
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     # Stage 2: Segmentation with DHBP
-    # Pass the encoder object directly — no checkpoint file searching
     seg_trainer = SegmentationTrainer(
-        encoder=contrastive_trainer.encoder,
+        encoder=encoder,
         n_classes=6,
         learning_rate=args.lr_seg,
         device=str(device),
