@@ -272,12 +272,54 @@ Tested whether unary head receives weak gradients through BP chain.
 
 ---
 
+## Experiment 4: BP Ablation Study (in progress)
+
+**Date**: 2026-03-24
+**Purpose**: Measure BP's actual contribution with a fair comparison. Three configs, same encoder, same data, same epochs.
+
+| Experiment | Config | Description |
+|-----------|--------|-------------|
+| A | `--epochs_seg 10 --labeled_percent 10` | Full DHBP (constrained pairwise, 2-layer unary + BP) |
+| B | `--epochs_seg 10 --labeled_percent 10 --no_bp` | No BP (2-layer unary head only) |
+| C | `--epochs_seg 10 --labeled_percent 10 --simple_unary` | Simple unary (Conv1x1 projection) + BP |
+
+### What the comparisons tell us
+
+| Comparison | If A >> B | If A ≈ B |
+|-----------|-----------|----------|
+| A vs B | BP is a real contribution | BP barely helps — novelty claim weak |
+| A vs C | 2-layer unary head matters | Simple projection is enough |
+| C vs B | BP helps even with minimal unary | BP is irrelevant |
+
+### Status: awaiting results
+
+---
+
+## Ruled out hypotheses (with evidence)
+
+### "Unary head gets weak gradients through BP" — WRONG
+- **Gradient comparison test**: BP chain gradients are 10-32x STRONGER than direct path
+- **Implication**: Auxiliary unary loss was proposed to fix a problem that doesn't exist
+- Unary collapse is caused by limited data (1 area) + BP compensation, not gradient dilution
+
+### "Unconstrained K×K pairwise matrix" — FAILED
+- Diagonal ratio 0.094, Tree→Building: 0.789, BP destroyed 3 classes
+- **Replaced with**: constrained α·I + (1-α)·R decomposition (diagonal ratio: 0.270)
+
+### "MoCo contrastive learning" — BROKEN IN ORIGINAL CODE
+- Key encoder returned feature maps not latents, memory bank filled with garbage
+- **Replaced with**: SimCLR (simpler, proven)
+
+### "VAE reconstruction path" — UNNECESSARY
+- Decoder + reconstruction loss not needed for segmentation
+- **Removed**: encoder only needs good features, not image reconstruction
+
+### "QuadtreeMRF (non-differentiable)" — REPLACED
+- Sequential node-by-node BP can't run on GPU
+- **Replaced with**: DHBP (same math, GPU-parallel tensor operations)
+
+---
+
 ## Upcoming Experiments
 
-See `TODO.md` for full list. Priority order:
-
-1. **Constrained pairwise training** (current) — 10 epochs at a time, 10% labels
-2. **Auxiliary unary loss** — direct supervision of unary heads
-3. **Dense contrastive learning** — pixel-level SimCLR for better Cars/small object features
-4. **More contrastive epochs** — current encoder is MODERATE, room to improve
-5. **Ablation study** — BP on vs off, constrained vs unconstrained pairwise, contrastive vs random encoder
+See `TODO.md` for full prioritized list and ruled-out items with evidence.

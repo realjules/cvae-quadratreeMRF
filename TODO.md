@@ -1,42 +1,77 @@
-# TODO — Future experiments
+# TODO — Future Experiments
 
-## After pairwise constraint fix (current PR)
+## Active experiments (running now)
 
-### Auxiliary unary loss
-- Add `0.4 * CE(phi_1, labels)` to loss function alongside focal + boundary
-- Gives unary head direct gradient signal instead of routing through BP
-- **Why**: unary accuracy is 58.8% but linear probe is 67.7% — the unary head underperforms
-- **Reference**: Zheng et al. 2015 (CRF-as-RNN) uses auxiliary losses at intermediate layers
+### BP ablation study (3 experiments, 10 epochs each, 10% labels)
+- **A**: Full DHBP (constrained pairwise, 2-layer unary + BP)
+- **B**: No BP (2-layer unary only, no message passing)
+- **C**: Simple unary + BP (Conv1x1 linear projection + BP)
+- **Purpose**: Measure BP's actual contribution for the paper
 
-### Unary head architecture
-- Replace Conv1x1 with Conv3x3 for spatial context
-- Current head: `Conv1x1(C→C/2) + BN + ReLU + Conv1x1(C/2→K) + log_softmax`
-- Proposed: `Conv3x3(C→C/2) + BN + ReLU + Conv3x3(C/2→C/4) + BN + ReLU + Conv1x1(C/4→K)`
+---
 
-### Dense contrastive learning (PixelCL)
-- Current SimCLR pulls patch-level features together — Cars (1.5% of pixels) get lost
+## Upcoming experiments (prioritized)
+
+### 1. Longer training with best configuration
+- Run winner of ablation A/B/C for 100 epochs
+- Loss was still decreasing at 10 epochs (0.84 → 0.55)
+
+### 2. Dense contrastive learning (PixelCL)
+- Current SimCLR pulls patch-level features — Cars (1.5% of pixels) get lost
 - Dense contrastive pulls pixel-level features at same location across augmented views
+- Should improve Cars (currently 0.01% linear probe) and fine-grained features
 - **Reference**: Wang et al. 2021, "Dense Contrastive Learning for Self-Supervised Visual Pre-Training"
 
-### Class-balanced patch sampling
+### 3. Encoder upgrade
+- Linear probe is 67.5% — MODERATE. This is the accuracy ceiling.
+- Try: longer contrastive training (200 epochs), lower temperature (0.05), larger batch (8)
+- Try: ResNet-34 or ResNet-50 (more capacity)
+
+### 4. Class-balanced patch sampling
 - During contrastive pre-training, oversample patches containing Cars/Clutter
 - Doesn't need labels — can use image statistics to identify small bright objects
 
-### Multi-scale cropping for contrastive
+### 5. Multi-scale cropping for contrastive
 - Add 128×128 and 64×64 crops alongside 256×256
 - Forces encoder to learn fine-grained features (important for Cars)
 
-### Encoder upgrade
-- Linear probe is 67.7% — MODERATE. Room to improve.
-- Try ResNet-34 or ResNet-50 (more capacity)
-- Try longer contrastive training (100+ epochs)
-- Try lower temperature (0.05 instead of 0.1)
-
-### ReduceLROnPlateau scheduler
+### 6. ReduceLROnPlateau scheduler
 - Current CosineAnnealingWarmRestarts causes accuracy oscillations
 - ReduceLROnPlateau(mode='max', patience=5) would be more stable
 
-### Multiple BP iterations
+### 7. Multiple BP iterations
 - Single pass is exact on tree, but stacking 2-3 passes with different pairwise heads
   could act as iterative refinement (similar to CRF-as-RNN unrolling)
 - Only explore if single pass hits a ceiling
+
+---
+
+## Ruled out (with evidence)
+
+### Auxiliary unary loss
+- **Hypothesis**: Unary head gets weak gradients through BP, needs direct supervision
+- **Tested**: Gradient comparison experiment showed BP chain gradients are 10-32x STRONGER than direct path, not weaker
+- **Finding**: Weak gradients was WRONG. Unary collapse is caused by limited data (1 training area) and BP compensation, not gradient dilution
+- **Status**: RULED OUT as a fix. May still be useful for other reasons but not for the stated hypothesis
+
+### Unconstrained K×K pairwise matrix
+- **Tested**: Trained model showed diagonal ratio 0.094 (should be >0.5)
+- **Finding**: The unconstrained matrix learned class remapping (Tree→Building: 0.789) instead of spatial consistency. BP destroyed 3 classes: Impervious (-14%), Trees (-19%), Cars (-28%)
+- **Status**: REPLACED with constrained α·I + (1-α)·R decomposition
+
+### Unary head architecture changes (Conv3x3, deeper)
+- **Hypothesis**: 1×1 conv unary head lacks spatial context
+- **Finding**: The gradient comparison showed the unary head receives STRONG gradients (10x stronger through BP). The collapse is a data/optimization issue, not architecture.
+- **Status**: DEFERRED. Testing simple Conv1x1 projection first (Experiment C). If simple projection + BP works well, complex unary head is unnecessary.
+
+### MoCo contrastive learning
+- **Tested**: Original codebase had broken MoCo implementation (key encoder returned feature maps not latents, memory bank filled with garbage)
+- **Status**: REPLACED with SimCLR (simpler, proven). MoCo adds complexity without clear benefit for this use case.
+
+### VAE reconstruction path
+- **From original codebase**: CVAE had decoder + reconstruction loss
+- **Status**: REMOVED. Decoder/reconstruction is not needed for segmentation. The encoder only needs to produce good features, not reconstruct images.
+
+### QuadtreeMRF (original, non-differentiable)
+- **From original proposal**: Sequential node-by-node belief propagation
+- **Status**: REPLACED with DHBP (GPU-parallel, differentiable). Same math, GPU-friendly implementation.
