@@ -282,3 +282,45 @@ class DHBPModule(nn.Module):
         b1_final = phi_1 + msg_dn_12      # [B, K, 128, 128]
 
         return b1_final
+
+    @torch.no_grad()
+    def forward_diagnostic(
+        self,
+        p1: torch.Tensor,
+        p2: torch.Tensor,
+        p3: torch.Tensor,
+    ) -> dict:
+        """Same as forward(), but returns ALL intermediate tensors for analysis.
+
+        Does NOT affect training — this is a read-only diagnostic method.
+        """
+        # Step 0: Potentials
+        phi_1 = self.unary_1(p1)
+        phi_2 = self.unary_2(p2)
+        phi_3 = self.unary_3(p3)
+        psi_12 = self.pairwise_12(p2)
+        psi_23 = self.pairwise_23(p3)
+
+        # Step 1: Leaf beliefs
+        b1 = phi_1
+
+        # Step 2: Bottom-up
+        msg_up_12, per_child_12 = _child_to_parent(b1, psi_12)
+        b2 = phi_2 + msg_up_12
+        msg_up_23, per_child_23 = _child_to_parent(b2, psi_23)
+        b3 = phi_3 + msg_up_23
+
+        # Step 3: Top-down
+        msg_dn_23 = _parent_to_child(b3, per_child_23, psi_23)
+        b2_final = phi_2 + msg_up_12 + msg_dn_23
+        msg_dn_12 = _parent_to_child(b2_final, per_child_12, psi_12)
+        b1_final = phi_1 + msg_dn_12
+
+        return {
+            'phi_1': phi_1,           'phi_2': phi_2,           'phi_3': phi_3,
+            'psi_12': psi_12,         'psi_23': psi_23,
+            'b1': b1,                 'b2': b2,                 'b3': b3,
+            'b2_final': b2_final,     'b1_final': b1_final,
+            'msg_up_12': msg_up_12,   'msg_up_23': msg_up_23,
+            'msg_dn_23': msg_dn_23,   'msg_dn_12': msg_dn_12,
+        }
