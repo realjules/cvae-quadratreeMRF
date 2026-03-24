@@ -291,6 +291,10 @@ def main():
                         help='Path to a pre-trained contrastive checkpoint. '
                              'If provided, Stage 1 is skipped and the encoder '
                              'is loaded from this file.')
+    parser.add_argument('--no_bp', action='store_true',
+                        help='Ablation: disable BP, use unary head only')
+    parser.add_argument('--simple_unary', action='store_true',
+                        help='Ablation: use single Conv1x1 instead of 2-layer unary head')
     parser.add_argument('--device', default='auto')
     args = parser.parse_args()
 
@@ -357,12 +361,17 @@ def main():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    # Stage 2: Segmentation with DHBP
+    # Stage 2: Segmentation
+    use_bp = not args.no_bp
+    if not use_bp:
+        print("\n*** ABLATION MODE: BP disabled — unary head only ***\n")
     seg_trainer = SegmentationTrainer(
         encoder=encoder,
         n_classes=6,
         learning_rate=args.lr_seg,
         device=str(device),
+        use_bp=use_bp,
+        simple_unary=args.simple_unary,
     )
 
     if args.epochs_seg > 0:

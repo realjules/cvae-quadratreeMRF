@@ -39,12 +39,20 @@ class SegmentationTrainer:
         n_classes: int = 6,
         learning_rate: float = 1e-3,
         device: str = 'cuda',
+        use_bp: bool = True,
+        simple_unary: bool = False,
     ):
         self.device = device
         self.n_classes = n_classes
+        self.use_bp = use_bp
         self.encoder = encoder.to(device)
-        self.dhbp = DHBPModule(n_classes=n_classes).to(device)
+        self.dhbp = DHBPModule(n_classes=n_classes, simple_unary=simple_unary).to(device)
         self.criterion = SegmentationLoss(n_classes=n_classes).to(device)
+
+        if not use_bp:
+            # No-BP ablation: encoder → unary head only (no message passing)
+            # Reuse unary_1 from DHBP so it's the same architecture
+            print("NOTE: BP disabled — using unary head only (ablation mode)")
 
         # End-to-end optimizer with differential learning rates
         self.optimizer = torch.optim.AdamW([
@@ -79,8 +87,12 @@ class SegmentationTrainer:
         # Extract multi-scale features (encoder IS fine-tuned)
         p1, p2, p3 = self.encoder.encode(images)
 
-        # DHBP forward pass
-        logits = self.dhbp(p1, p2, p3)  # [B, n_classes, 128, 128]
+        if self.use_bp:
+            # Full DHBP: unary + pairwise + belief propagation
+            logits = self.dhbp(p1, p2, p3)  # [B, n_classes, 128, 128]
+        else:
+            # Ablation: unary head only, no message passing
+            logits = F.log_softmax(self.dhbp.unary_1(p1), dim=1)  # [B, K, 128, 128]
 
         # Upsample logits to match label spatial dims
         if logits.shape[2:] != labels.shape[1:]:
@@ -116,7 +128,11 @@ class SegmentationTrainer:
 
         images = images.to(self.device)
         p1, p2, p3 = self.encoder.encode(images)
-        logits = self.dhbp(p1, p2, p3)  # [B, n_classes, 128, 128]
+
+        if self.use_bp:
+            logits = self.dhbp(p1, p2, p3)
+        else:
+            logits = F.log_softmax(self.dhbp.unary_1(p1), dim=1)
 
         # Upsample to input resolution
         logits = F.interpolate(

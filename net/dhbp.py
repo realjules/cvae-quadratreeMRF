@@ -72,6 +72,21 @@ class UnaryPotentialHead(nn.Module):
         return F.log_softmax(self.net(feat), dim=1)
 
 
+class SimpleUnaryHead(nn.Module):
+    """Minimal linear projection from features to class log-probabilities.
+
+    Single Conv1x1(C→K) + log_softmax. No hidden layer, no BN, no ReLU.
+    This is the minimum bridge between feature space and probability space.
+    """
+
+    def __init__(self, in_channels: int, n_classes: int):
+        super().__init__()
+        self.proj = nn.Conv2d(in_channels, n_classes, 1)
+
+    def forward(self, feat: torch.Tensor) -> torch.Tensor:
+        return F.log_softmax(self.proj(feat), dim=1)
+
+
 class PairwisePotentialHead(nn.Module):
     """Constrained diagonal-dominant pairwise potential.
 
@@ -254,14 +269,17 @@ class DHBPModule(nn.Module):
     Output: logits [B, n_classes, 128, 128]
     """
 
-    def __init__(self, n_classes: int = 6):
+    def __init__(self, n_classes: int = 6, simple_unary: bool = False):
         super().__init__()
         self.n_classes = n_classes
 
         # Unary potential heads (features → log class probabilities)
-        self.unary_1 = UnaryPotentialHead(64, n_classes)    # fine: 128×128
-        self.unary_2 = UnaryPotentialHead(128, n_classes)   # mid: 64×64
-        self.unary_3 = UnaryPotentialHead(256, n_classes)   # coarse: 32×32
+        Head = SimpleUnaryHead if simple_unary else UnaryPotentialHead
+        if simple_unary:
+            print("DHBP: using SimpleUnaryHead (Conv1x1 linear projection)")
+        self.unary_1 = Head(64, n_classes)    # fine: 128×128
+        self.unary_2 = Head(128, n_classes)   # mid: 64×64
+        self.unary_3 = Head(256, n_classes)   # coarse: 32×32
 
         # Pairwise potential heads (features → K×K log-compatibility)
         # Computed at parent resolution from parent-level features

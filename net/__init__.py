@@ -7,7 +7,7 @@ Neural network modules for DHBP semi-supervised segmentation.
 """
 
 from .cvae import ResNet18Encoder, SimCLRProjectionHead, ContrastiveEncoder
-from .dhbp import DHBPModule, UnaryPotentialHead, PairwisePotentialHead
+from .dhbp import DHBPModule, UnaryPotentialHead, SimpleUnaryHead, PairwisePotentialHead
 from .loss import FocalLoss, DifferentiableBoundaryLoss, SegmentationLoss
 
 __all__ = [
