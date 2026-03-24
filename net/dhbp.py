@@ -73,28 +73,51 @@ class UnaryPotentialHead(nn.Module):
 
 
 class PairwisePotentialHead(nn.Module):
-    """Maps encoder features to spatially-varying K×K log-compatibility matrices.
+    """Constrained diagonal-dominant pairwise potential.
 
-    Output is log ψ(x_parent, x_child) — a K×K matrix at each spatial
-    location representing how compatible each pair of parent-child states is.
+    Decomposes the K×K compatibility matrix as:
 
-    This is the KEY NOVELTY: pairwise potentials are not fixed (Potts model)
-    or globally learned, but are spatially varying and predicted from
-    contrastive-pretrained encoder features. Contrastive learning ensures
-    that semantically similar regions produce high-compatibility potentials,
-    directly improving structured prediction.
+        ψ = α · I + (1-α) · R
+
+    where:
+        α ∈ [0,1] = per-location consistency strength (predicted from features)
+        I = identity matrix (same-class → same-class)
+        R = learned residual transition matrix (softmax-normalized rows)
+
+    This constrains the pairwise to START as pure spatial consistency (α≈0.8)
+    and only learn small transition corrections where needed (boundaries).
+    Prevents the failure mode where unconstrained K×K matrices learn class
+    remapping instead of spatial consistency.
+
+    Reference: generalizes the Potts model (Boykov & Jolly 2001) with a
+    learned, spatially-varying consistency strength.
     """
 
     def __init__(self, in_channels: int, n_classes: int):
         super().__init__()
         self.n_classes = n_classes
-        mid = max(in_channels // 2, n_classes * n_classes)
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, mid, 1),
+        mid = max(in_channels // 4, 16)
+
+        # α: consistency strength per location → [0,1] via sigmoid
+        self.alpha_net = nn.Sequential(
+            nn.Conv2d(in_channels, mid, 3, padding=1),
+            nn.BatchNorm2d(mid),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid, 1, 1),
+        )
+        # Initialize bias so sigmoid(1.4) ≈ 0.8 — consistency-biased start
+        nn.init.constant_(self.alpha_net[-1].bias, 1.4)
+
+        # R: residual transition matrix (small corrections)
+        self.residual_net = nn.Sequential(
+            nn.Conv2d(in_channels, mid, 3, padding=1),
             nn.BatchNorm2d(mid),
             nn.ReLU(inplace=True),
             nn.Conv2d(mid, n_classes * n_classes, 1),
         )
+
+        # Fixed identity matrix
+        self.register_buffer('_identity', torch.eye(n_classes))
 
     def forward(self, feat: torch.Tensor) -> torch.Tensor:
         """
@@ -102,15 +125,25 @@ class PairwisePotentialHead(nn.Module):
             feat: [B, C_in, H, W] encoder features at parent resolution
 
         Returns:
-            [B, K, K, H, W] log-pairwise potentials.
-            Dimension 1 = parent state, dimension 2 = child state.
-            Normalized over child states (dim=2) via log_softmax.
+            [B, K, K, H, W] log-pairwise potentials (diagonal-dominant).
         """
         K = self.n_classes
         B, _, H, W = feat.shape
-        raw = self.net(feat)                         # [B, K*K, H, W]
-        psi = raw.view(B, K, K, H, W)               # [B, K_parent, K_child, H, W]
-        return F.log_softmax(psi, dim=2)             # normalize over child states
+
+        # Consistency strength: high α → strong same-class enforcement
+        alpha = torch.sigmoid(self.alpha_net(feat))          # [B, 1, H, W]
+        alpha = alpha.unsqueeze(1)                           # [B, 1, 1, H, W]
+
+        # Residual transition matrix: softmax rows → valid distribution
+        residual = self.residual_net(feat)                   # [B, K*K, H, W]
+        residual = residual.view(B, K, K, H, W)             # [B, K, K, H, W]
+        residual = F.softmax(residual, dim=2)                # normalize over child states
+
+        # ψ = α·I + (1-α)·R  — diagonal-dominant by construction
+        identity = self._identity.view(1, K, K, 1, 1)       # [1, K, K, 1, 1]
+        psi = alpha * identity + (1.0 - alpha) * residual   # [B, K, K, H, W]
+
+        return torch.log(psi + 1e-8)                        # log-space for BP
 
 
 def _child_to_parent(
