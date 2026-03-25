@@ -98,7 +98,7 @@ def main():
     else:
         device = torch.device(args.device)
 
-    focal = FocalLoss(gamma=2.0, class_weights=torch.tensor([1.0, 1.5, 1.0, 1.0, 3.0, 1.2]))
+    focal = FocalLoss(gamma=2.0, class_weights=torch.tensor([1.0, 1.5, 1.0, 1.0, 3.0, 1.2], device=device))
 
     # Fixed input for fair comparison across stages
     torch.manual_seed(42)
