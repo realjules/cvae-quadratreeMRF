@@ -455,6 +455,67 @@ This is a reproducible, measurable empirical finding about how structured predic
 
 ---
 
+## Experiment 7: Quadtree Depth Ablation — 2 vs 3 vs 4 Levels
+
+**Date**: 2026-03-25
+**Purpose**: Test whether shallower trees (less blur) or deeper trees (more multi-scale context) improve accuracy. All using α·I+(1-α)·R pairwise.
+
+### Results (5 epochs, 10% labels, 1 area)
+
+| | 2 levels | 3 levels | 4 levels |
+|---|---|---|---|
+| **Overall** | 49.70% | **61.59%** | 58.20% |
+| **Mean class** | 37.61% | **43.67%** | 41.69% |
+| Impervious | 43.79% | **70.18%** | 50.68% |
+| Buildings | **73.17%** | 69.67% | 74.31% |
+| Low Veg | 9.12% | 33.09% | **46.59%** |
+| Trees | **87.72%** | 78.04% | 69.89% |
+| Cars | **11.89%** | 11.04% | 8.66% |
+
+### Analysis
+
+**3 levels is the sweet spot.** Beats both 2 and 4 on overall accuracy by a significant margin.
+
+**2 levels is too shallow (49.7%):** Without the coarse level (32×32), BP can't propagate semantic context far enough. Impervious (43.8%) suffers most — it needs medium-range context that 2 levels can't provide.
+
+**4 levels is too deep (58.2%):** Extra averaging step (32→16) adds blur without enough useful context. But 4 levels has the best Low Veg (46.6%) — deeper trees help classes that occupy large contiguous regions.
+
+**Cars degrades monotonically: 11.9% → 11.0% → 8.7%.** More levels = more averaging = more suppression of tiny objects. This directly confirms the quadtree averaging problem scales with depth.
+
+**Trees degrades monotonically: 87.7% → 78.0% → 69.9%.** Deeper trees average away the Trees signal, especially when Tree regions are adjacent to Buildings or Impervious in the 2×2 blocks.
+
+### Gradient amplification vs depth (pending)
+
+Running `test_gradient_depth.py` to measure whether gradient amplification scales with tree depth (prediction: 2 levels ~3-5x, 3 levels ~7-10x, 4 levels ~15-25x).
+
+---
+
+## Experiment 8: Hard Diagonal Pairwise
+
+**Date**: 2026-03-25
+**Purpose**: Test whether BP's value comes from gradient amplification alone (no class mixing) by using ψ = diag(d) with zero off-diagonal.
+
+### Results (5 epochs, 10% labels, 1 area)
+
+| | Hard diagonal | α·I+(1-α)·R (3 lev) | No BP |
+|---|---|---|---|
+| **Overall** | 49.74% | **61.59%** | ~53% |
+| Buildings | **86.82%** | 69.67% | ~79% |
+| Trees | **91.17%** | 78.04% | ~84% |
+| Impervious | 32.03% | **70.18%** | ~38% |
+| Low Veg | 8.92% | **33.09%** | ~15% |
+| Cars | 0.73% | **11.04%** | ~10% |
+
+### Diagnostic findings
+
+- Pairwise diagonal ratio: 1.000 (by construction)
+- BP changes **69.7%** of pixels (vs 40% with α·I+(1-α)·R) — massive reclassification
+- BP changes interior pixels **70.0%** — more than boundaries (65.1%)
+- Learned scaling: Buildings 1.045 (amplified), everything else <1.0 (suppressed)
+- **Verdict**: Without class mixing, BP becomes a pure majority amplifier. Optimizer suppresses all minority classes. The worst of all pairwise variants.
+
+---
+
 ## Ruled out hypotheses (with evidence)
 
 ### "Quadtree BP improves segmentation via structured inference" — MARGINAL
