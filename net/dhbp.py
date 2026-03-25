@@ -210,17 +210,19 @@ class PairwisePotentialHead(nn.Module):
 def _child_to_parent(
     child_belief: torch.Tensor,
     log_psi: torch.Tensor,
+    use_attention: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Bottom-up message: aggregate 4 children in a 2×2 quadtree block.
 
-    BP equation (log-space):
-        log m_{c→p}(x_p) = logsumexp_{x_c} [log ψ(x_p, x_c) + log b_c(x_c)]
-        Total message = sum over 4 children (product in prob-space).
+    Standard BP uses equal-weight sum over children (majority voting).
+    With use_attention=True, weights children by confidence (negative entropy)
+    so confident children have more influence — fixes the majority voting
+    problem where 3 uncertain siblings outvote 1 correct pixel.
 
     Args:
         child_belief: [B, K, H, W] log-beliefs at child (fine) level
         log_psi: [B, K, K, H_p, W_p] log-pairwise at parent resolution
-                 where H_p = H//2, W_p = W//2
+        use_attention: if True, weight children by confidence (entropy-based)
 
     Returns:
         msg_total: [B, K, H_p, W_p] total upward message
@@ -230,25 +232,36 @@ def _child_to_parent(
     H_p, W_p = H // 2, W // 2
 
     # Reshape child beliefs into 2×2 quadtree blocks → 4 children per parent
-    # [B, K, H, W] → [B, K, H_p, 2, W_p, 2] → [B, K, H_p, W_p, 4]
     cb = child_belief.reshape(B, K, H_p, 2, W_p, 2)
     cb = cb.permute(0, 1, 2, 4, 3, 5)               # [B, K, H_p, W_p, 2, 2]
     cb = cb.reshape(B, K, H_p, W_p, 4)              # [B, K, H_p, W_p, 4]
 
-    # For each child, compute message via logsumexp over child states
-    # log_psi: [B, K_p, K_c, H_p, W_p]
-    # child_c: [B, K_c, H_p, W_p] → [B, 1, K_c, H_p, W_p] for broadcast
+    # Compute per-child messages via logsumexp over child states
     per_child_list = []
     for c in range(4):
         child_c = cb[:, :, :, :, c]                  # [B, K, H_p, W_p]
-        # log_psi[b, k_p, k_c, h, w] + child_c[b, k_c, h, w]
-        # → logsumexp over k_c (dim=2)
         combined = log_psi + child_c.unsqueeze(1)    # [B, K_p, K_c, H_p, W_p]
         msg_c = torch.logsumexp(combined, dim=2)     # [B, K, H_p, W_p]
         per_child_list.append(msg_c)
 
     per_child = torch.stack(per_child_list, dim=-1)  # [B, K, H_p, W_p, 4]
-    msg_total = per_child.sum(dim=-1)                # [B, K, H_p, W_p]
+
+    if use_attention:
+        # Entropy-based attention: confident children get more weight
+        # Compute entropy of each child's belief (lower entropy = more confident)
+        child_probs = F.softmax(cb, dim=1)           # [B, K, H_p, W_p, 4]
+        child_entropy = -(child_probs * torch.log(child_probs + 1e-8)).sum(dim=1, keepdim=True)
+        # [B, 1, H_p, W_p, 4] — entropy per child
+
+        # Attention = softmax of negative entropy (confident = high weight)
+        attn_weights = F.softmax(-child_entropy, dim=-1)  # [B, 1, H_p, W_p, 4]
+
+        # Weighted sum (multiply weights across K dimension via broadcast)
+        msg_total = (per_child * attn_weights).sum(dim=-1) * 4.0  # [B, K, H_p, W_p]
+        # Scale by 4 to maintain similar magnitude as equal-weight sum
+    else:
+        # Standard BP: equal-weight sum
+        msg_total = per_child.sum(dim=-1)            # [B, K, H_p, W_p]
 
     return msg_total, per_child
 

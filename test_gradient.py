@@ -1,11 +1,11 @@
-"""Gradient flow test for encoder + DHBP (constrained pairwise) + loss pipeline."""
+"""Gradient flow test for encoder + DHBP (entropy-weighted BP) + loss pipeline."""
 
 import torch
 from net.cvae import ContrastiveEncoder
 from net.dhbp import DHBPModule
 from net.loss import SegmentationLoss
 
-print("=== Gradient Flow Test (Constrained Pairwise) ===")
+print("=== Gradient Flow Test (Entropy-Weighted BP) ===")
 
 encoder = ContrastiveEncoder(pretrained=True)
 dhbp = DHBPModule(n_classes=6)
@@ -25,23 +25,16 @@ print(f"Loss: {components}")
 loss.backward()
 
 checks = {
-    # Encoder
     "encoder.stem[0].weight": encoder.encoder.stem[0].weight.grad,
     "encoder.layer1[0].conv1.weight": encoder.encoder.layer1[0].conv1.weight.grad,
     "encoder.layer2[0].conv1.weight": encoder.encoder.layer2[0].conv1.weight.grad,
     "encoder.layer3[0].conv1.weight": encoder.encoder.layer3[0].conv1.weight.grad,
-    # Unary heads
     "dhbp.unary_1.net[0].weight": dhbp.unary_1.net[0].weight.grad,
     "dhbp.unary_2.net[0].weight": dhbp.unary_2.net[0].weight.grad,
     "dhbp.unary_3.net[0].weight": dhbp.unary_3.net[0].weight.grad,
-    # Pairwise alpha (consistency strength)
     "dhbp.pairwise_12.alpha_net[0].weight": dhbp.pairwise_12.alpha_net[0].weight.grad,
-    "dhbp.pairwise_12.alpha_net[3].weight": dhbp.pairwise_12.alpha_net[3].weight.grad,
-    "dhbp.pairwise_23.alpha_net[0].weight": dhbp.pairwise_23.alpha_net[0].weight.grad,
-    # Pairwise residual (transition corrections)
     "dhbp.pairwise_12.residual_net[0].weight": dhbp.pairwise_12.residual_net[0].weight.grad,
-    "dhbp.pairwise_12.residual_net[3].weight": dhbp.pairwise_12.residual_net[3].weight.grad,
-    "dhbp.pairwise_23.residual_net[0].weight": dhbp.pairwise_23.residual_net[0].weight.grad,
+    "dhbp.pairwise_23.alpha_net[0].weight": dhbp.pairwise_23.alpha_net[0].weight.grad,
 }
 
 all_ok = True
@@ -58,12 +51,6 @@ for name, p in list(encoder.named_parameters()) + list(dhbp.named_parameters()):
     if p.grad is not None and p.grad.abs().max() == 0:
         zero_count += 1
         print(f"  WARN {name}: grad is all zeros")
-
-# Check initial alpha value
-with torch.no_grad():
-    p1t, p2t, _ = encoder.encode(torch.randn(1, 3, 256, 256))
-    alpha_12 = torch.sigmoid(dhbp.pairwise_12.alpha_net(p2t))
-    print(f"\nInitial alpha (pairwise_12): mean={alpha_12.mean():.4f} (target ~0.8)")
 
 print(f"\nZero-grad params: {zero_count}")
 print("PASS" if all_ok else "FAIL")

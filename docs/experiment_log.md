@@ -484,9 +484,28 @@ This is a reproducible, measurable empirical finding about how structured predic
 
 **Trees degrades monotonically: 87.7% → 78.0% → 69.9%.** Deeper trees average away the Trees signal, especially when Tree regions are adjacent to Buildings or Impervious in the 2×2 blocks.
 
-### Gradient amplification vs depth (pending)
+### Gradient amplification vs depth (measured)
 
-Running `test_gradient_depth.py` to measure whether gradient amplification scales with tree depth (prediction: 2 levels ~3-5x, 3 levels ~7-10x, 4 levels ~15-25x).
+| Depth | Unary amplification | Encoder amplification |
+|---|---|---|
+| 2 levels | 5.7x (±0.7) | 7.4x (±0.5) |
+| 3 levels | 8.3x (±1.1) | 16.6x (±3.3) |
+| 4 levels | 7.6x (±1.5) | **22.6x (±7.3)** |
+
+**Finding**: Encoder gradient amplification scales with depth (7.4x → 16.6x → 22.6x), roughly doubling per level. Unary amplification plateaus (~6-8x regardless of depth) because the unary head is always at the leaf level.
+
+**Interpretation**: Each additional quadtree level adds more gradient paths through the encoder (which feeds all levels), amplifying the encoder's gradient signal. But at 4 levels, the 22.6x amplification overshoots — combined with 3 steps of spatial averaging, it produces worse accuracy (58.2%) than 3 levels (61.6%).
+
+**The optimal depth balances gradient amplification (benefits from more levels) against spatial blur (costs of more levels).** At 3 levels, 16.6x encoder amplification is the sweet spot.
+
+**Relationship between amplification and accuracy:**
+
+```
+Depth    Encoder amp    Accuracy    Interpretation
+2 lev    7.4x           49.7%       Too little amplification, too little context
+3 lev    16.6x          61.6%       Sweet spot
+4 lev    22.6x          58.2%       Too much amplification, too much blur
+```
 
 ---
 
