@@ -32,6 +32,13 @@ from net.dhbp import DHBPModule
 from net.loss import FocalLoss
 
 
+def _grad_norm(param):
+    """Safe gradient norm — returns 0.0 if no gradient."""
+    if param.grad is not None:
+        return param.grad.norm().item()
+    return 0.0
+
+
 def measure_gradients(encoder, dhbp, focal, x, labels, stage_name):
     """Measure gradient norms through BP chain vs direct path."""
     # PATH A: Through BP chain
@@ -45,13 +52,13 @@ def measure_gradients(encoder, dhbp, focal, x, labels, stage_name):
     loss_bp.backward()
 
     grad_a = {
-        'unary_1.net[0]': dhbp.unary_1.net[0].weight.grad.norm().item(),
-        'unary_1.net[-1]': dhbp.unary_1.net[-1].weight.grad.norm().item(),
-        'encoder.layer1': encoder.encoder.layer1[0].conv1.weight.grad.norm().item(),
-        'encoder.layer2': encoder.encoder.layer2[0].conv1.weight.grad.norm().item(),
+        'unary_1.net[0]': _grad_norm(dhbp.unary_1.net[0].weight),
+        'unary_1.net[-1]': _grad_norm(dhbp.unary_1.net[-1].weight),
+        'encoder.layer1': _grad_norm(encoder.encoder.layer1[0].conv1.weight),
     }
 
     # PATH B: Direct to unary (no BP)
+    # Only uses p1 → unary_1, so only layer1 and unary_1 get gradients
     encoder.zero_grad()
     dhbp.zero_grad()
 
@@ -63,10 +70,9 @@ def measure_gradients(encoder, dhbp, focal, x, labels, stage_name):
     loss_direct.backward()
 
     grad_b = {
-        'unary_1.net[0]': dhbp.unary_1.net[0].weight.grad.norm().item(),
-        'unary_1.net[-1]': dhbp.unary_1.net[-1].weight.grad.norm().item(),
-        'encoder.layer1': encoder.encoder.layer1[0].conv1.weight.grad.norm().item(),
-        'encoder.layer2': encoder.encoder.layer2[0].conv1.weight.grad.norm().item(),
+        'unary_1.net[0]': _grad_norm(dhbp.unary_1.net[0].weight),
+        'unary_1.net[-1]': _grad_norm(dhbp.unary_1.net[-1].weight),
+        'encoder.layer1': _grad_norm(encoder.encoder.layer1[0].conv1.weight),
     }
 
     # Print results
@@ -82,7 +88,8 @@ def measure_gradients(encoder, dhbp, focal, x, labels, stage_name):
         ratios.append(ratio)
         print(f"  {name:<25} {a:>10.6f} {b:>10.6f} {ratio:>7.1f}x")
 
-    avg_ratio = sum(r for r in ratios if r != float('inf')) / len([r for r in ratios if r != float('inf')])
+    finite_ratios = [r for r in ratios if r != float('inf')]
+    avg_ratio = sum(finite_ratios) / len(finite_ratios) if finite_ratios else 0.0
     return avg_ratio
 
 
