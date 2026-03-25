@@ -41,12 +41,16 @@ class SegmentationTrainer:
         device: str = 'cuda',
         use_bp: bool = True,
         simple_unary: bool = False,
+        diagonal_pairwise: bool = False,
     ):
         self.device = device
         self.n_classes = n_classes
         self.use_bp = use_bp
         self.encoder = encoder.to(device)
-        self.dhbp = DHBPModule(n_classes=n_classes, simple_unary=simple_unary).to(device)
+        self.dhbp = DHBPModule(
+            n_classes=n_classes, simple_unary=simple_unary,
+            diagonal_pairwise=diagonal_pairwise,
+        ).to(device)
         self.criterion = SegmentationLoss(n_classes=n_classes).to(device)
 
         if not use_bp:

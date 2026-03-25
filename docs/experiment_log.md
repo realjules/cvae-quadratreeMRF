@@ -398,6 +398,63 @@ directly model "neighboring pixels should have the same class."
 
 ---
 
+## Experiment 6: Gradient Amplification — Is It Real or an Artifact?
+
+**Date**: 2026-03-25
+**Purpose**: Our initial measurement (10-32x gradient amplification through BP) was from one random initialization. We need to verify this is a real property of the computation graph, not an init artifact.
+
+### Method
+
+Measured gradient norms (BP chain vs direct supervision) at four stages:
+1. Random init (ImageNet encoder + random DHBP)
+2. After contrastive pre-training (trained encoder, epoch 43 + random DHBP)
+3. After segmentation training (fine-tuned encoder + trained DHBP, 50 epochs)
+4. Across 5 different random seeds
+
+### Results
+
+| Stage | unary_1.net[0] | unary_1.net[-1] | encoder.layer1 | Avg ratio |
+|---|---|---|---|---|
+| Random init | 2.8x | 11.4x | 6.1x | **6.7x** |
+| After contrastive | 6.1x | 12.5x | 12.8x | **10.5x** |
+| After segmentation | 3.5x | 9.3x | 9.4x | **7.4x** |
+
+Random seed variation (5 seeds):
+
+| Seed | Avg ratio |
+|---|---|
+| 0 | 9.0x |
+| 1 | 12.7x |
+| 2 | 8.4x |
+| 3 | 5.6x |
+| 4 | 9.1x |
+| **Mean ± Std** | **9.0x ± 2.3x** |
+
+### Finding
+
+**The gradient amplification is REAL and CONSISTENT.** It persists across:
+- All training stages (6.7x - 10.5x)
+- Multiple random seeds (9.0x ± 2.3x)
+- Both random and trained weights
+
+This is a property of the BP computation graph — the multi-path structure (4 children per parent, bottom-up + top-down passes) creates multiple gradient paths that sum together, amplifying the total gradient signal ~7-10x compared to direct supervision.
+
+### Limitations
+
+- Measured on ONE type of structured prediction module (quadtree BP, 3 levels)
+- To claim generality, would need measurements on grid CRF, chain CRF, dense CRF
+- The amplification factor likely scales with graph connectivity (more paths = more amplification)
+- Unknown whether this amplification is helpful (faster convergence) or harmful (instability)
+
+### Significance
+
+This is a reproducible, measurable empirical finding about how structured prediction modules affect gradient dynamics. It hasn't been explicitly characterized in prior work (Zheng et al. 2015 noted vanishing/exploding gradients through CRF iterations but didn't measure the amplification ratio vs direct supervision). It could explain:
+- Why end-to-end CRF training outperforms CRF post-processing (gradient amplification helps encoder)
+- Why BP helped more early in training (+5.5% at 10 epochs) than at convergence (+1.8% at 50 epochs) — the amplification is most useful when gradients are weakest
+- Why structured prediction layers sometimes cause training instability — the amplification can overshoot
+
+---
+
 ## Ruled out hypotheses (with evidence)
 
 ### "Quadtree BP improves segmentation via structured inference" — MARGINAL
@@ -406,9 +463,10 @@ directly model "neighboring pixels should have the same class."
 - Quadtree lacks horizontal connections needed for spatial consistency
 - **Status**: The quadtree BP concept works mechanically but the graph structure is wrong for this task
 
-### "Unary head gets weak gradients through BP" — WRONG
-- **Gradient comparison test**: BP chain gradients are 10-32x STRONGER than direct path
-- **Implication**: Auxiliary unary loss was proposed to fix a problem that doesn't exist
+### "Unary head gets weak gradients through BP" — WRONG (opposite is true)
+- **Gradient comparison test**: BP chain gradients are 7-10x STRONGER than direct path
+- **Verified across**: 3 training stages + 5 random seeds (9.0x ± 2.3x average)
+- **Implication**: Auxiliary unary loss was proposed to fix a problem that doesn't exist. The BP computation graph actually AMPLIFIES gradients, it doesn't dilute them.
 - Unary collapse is caused by limited data (1 area) + BP compensation, not gradient dilution
 
 ### "Unconstrained K×K pairwise matrix" — FAILED

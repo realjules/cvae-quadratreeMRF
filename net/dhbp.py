@@ -87,6 +87,52 @@ class SimpleUnaryHead(nn.Module):
         return F.log_softmax(self.proj(feat), dim=1)
 
 
+class DiagonalPairwiseHead(nn.Module):
+    """Hard diagonal pairwise: ψ = diag(d), no class mixing.
+
+    Each class gets an independent positive scaling factor per location.
+    d > 1 amplifies belief, d < 1 suppresses, d = 1 passes through.
+    Off-diagonal is zero — no class transitions possible.
+
+    This isolates whether BP's value comes from gradient amplification
+    alone (multi-path computation) or from the pairwise class mixing.
+    """
+
+    def __init__(self, in_channels: int, n_classes: int):
+        super().__init__()
+        self.n_classes = n_classes
+        mid = max(in_channels // 4, 16)
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, mid, 3, padding=1),
+            nn.BatchNorm2d(mid),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid, n_classes, 1),
+        )
+        # Initialize bias to 0 → softplus(0) = ln(2) ≈ 0.69 → near-identity scaling
+        nn.init.constant_(self.net[-1].bias, 0.0)
+
+    def forward(self, feat: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            feat: [B, C_in, H, W] encoder features at parent resolution
+
+        Returns:
+            [B, K, K, H, W] log-pairwise potentials (diagonal only).
+        """
+        K = self.n_classes
+        B, _, H, W = feat.shape
+
+        # K positive scalars per location
+        d = F.softplus(self.net(feat))  # [B, K, H, W], all positive
+
+        # Build diagonal K×K matrix: off-diagonal = -inf (log(0))
+        log_psi = torch.full((B, K, K, H, W), -1e8, device=feat.device)
+        for k in range(K):
+            log_psi[:, k, k, :, :] = torch.log(d[:, k, :, :] + 1e-8)
+
+        return log_psi
+
+
 class PairwisePotentialHead(nn.Module):
     """Constrained diagonal-dominant pairwise potential.
 
@@ -269,22 +315,25 @@ class DHBPModule(nn.Module):
     Output: logits [B, n_classes, 128, 128]
     """
 
-    def __init__(self, n_classes: int = 6, simple_unary: bool = False):
+    def __init__(self, n_classes: int = 6, simple_unary: bool = False,
+                 diagonal_pairwise: bool = False):
         super().__init__()
         self.n_classes = n_classes
 
         # Unary potential heads (features → log class probabilities)
-        Head = SimpleUnaryHead if simple_unary else UnaryPotentialHead
+        UHead = SimpleUnaryHead if simple_unary else UnaryPotentialHead
         if simple_unary:
             print("DHBP: using SimpleUnaryHead (Conv1x1 linear projection)")
-        self.unary_1 = Head(64, n_classes)    # fine: 128×128
-        self.unary_2 = Head(128, n_classes)   # mid: 64×64
-        self.unary_3 = Head(256, n_classes)   # coarse: 32×32
+        self.unary_1 = UHead(64, n_classes)    # fine: 128×128
+        self.unary_2 = UHead(128, n_classes)   # mid: 64×64
+        self.unary_3 = UHead(256, n_classes)   # coarse: 32×32
 
         # Pairwise potential heads (features → K×K log-compatibility)
-        # Computed at parent resolution from parent-level features
-        self.pairwise_12 = PairwisePotentialHead(128, n_classes)  # edge 1↔2, uses p2
-        self.pairwise_23 = PairwisePotentialHead(256, n_classes)  # edge 2↔3, uses p3
+        PHead = DiagonalPairwiseHead if diagonal_pairwise else PairwisePotentialHead
+        if diagonal_pairwise:
+            print("DHBP: using DiagonalPairwiseHead (no class mixing)")
+        self.pairwise_12 = PHead(128, n_classes)  # edge 1↔2, uses p2
+        self.pairwise_23 = PHead(256, n_classes)  # edge 2↔3, uses p3
 
     def forward(
         self,

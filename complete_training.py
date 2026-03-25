@@ -295,6 +295,8 @@ def main():
                         help='Ablation: disable BP, use unary head only')
     parser.add_argument('--simple_unary', action='store_true',
                         help='Ablation: use single Conv1x1 instead of 2-layer unary head')
+    parser.add_argument('--diagonal_pairwise', action='store_true',
+                        help='Ablation: hard diagonal pairwise (no class mixing)')
     parser.add_argument('--device', default='auto')
     args = parser.parse_args()
 
@@ -372,6 +374,7 @@ def main():
         device=str(device),
         use_bp=use_bp,
         simple_unary=args.simple_unary,
+        diagonal_pairwise=args.diagonal_pairwise,
     )
 
     if args.epochs_seg > 0:
