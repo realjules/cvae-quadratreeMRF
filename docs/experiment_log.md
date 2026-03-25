@@ -283,15 +283,44 @@ Tested whether unary head receives weak gradients through BP chain.
 | B | `--epochs_seg 10 --labeled_percent 10 --no_bp` | No BP (2-layer unary head only) |
 | C | `--epochs_seg 10 --labeled_percent 10 --simple_unary` | Simple unary (Conv1x1 projection) + BP |
 
-### What the comparisons tell us
+### Results (10 epochs)
 
-| Comparison | If A >> B | If A ≈ B |
-|-----------|-----------|----------|
-| A vs B | BP is a real contribution | BP barely helps — novelty claim weak |
-| A vs C | 2-layer unary head matters | Simple projection is enough |
-| C vs B | BP helps even with minimal unary | BP is irrelevant |
+| | A: Full DHBP | B: No BP | C: Simple + BP |
+|---|---|---|---|
+| Overall | **61.35%** | 55.84% | 53.91% |
+| Mean class | **45.09%** | 40.72% | 39.85% |
 
-### Status: awaiting results
+BP added **+5.5%** at 10 epochs. Promising early signal.
+
+### Results (50 epochs) — FINAL
+
+| | A: Full DHBP | B: No BP | C: Simple + BP |
+|---|---|---|---|
+| **Best accuracy** | **61.65%** | 59.86% | 59.22% |
+| **Final accuracy** | 54.58% | 54.15% | 56.12% |
+| **Mean class (final)** | 43.21% | 42.27% | **44.67%** |
+| Impervious | 35.79% | **39.81%** | 39.44% |
+| Buildings | **82.14%** | 75.47% | 76.29% |
+| Low Veg | 30.62% | 29.67% | **47.97%** |
+| Trees | 86.66% | **88.60%** | 77.85% |
+| Cars | **24.05%** | 20.05% | **26.46%** |
+
+### Analysis
+
+**BP's contribution is small at convergence.** The +5.5% gap at 10 epochs closed to +1.8% (best) and +0.4% (final) at 50 epochs. The no-BP model caught up with more training.
+
+**Training instability.** All three models peak at epoch 15-35 then degrade by epoch 50. Best accuracy is 61.65% but final accuracy is 54.58%. The CosineAnnealingWarmRestarts scheduler's LR resets destroy progress.
+
+**Simple unary + BP (C) is surprisingly strong.** Best mean class accuracy (44.67%), best Low Veg (47.97%), best Cars (26.46%). A linear projection + BP outperforms the 2-layer unary for minority classes.
+
+**Comparison to CRFNet baseline.** CRFNet (Pastorino et al., 2024, IEEE TGRS) achieves **83-84%** at 10% labels on the same dataset. We're at 61.65%. The gap is large.
+
+### Key issues identified
+
+1. **Training instability** — cosine warm restart causes accuracy drops. Need ReduceLROnPlateau or no restarts.
+2. **Only 1 labeled area** — 10% of 13 = 1 area. This is the dominant limiting factor.
+3. **Encoder ceiling** — linear probe at 67.5% caps everything downstream.
+4. **BP gap narrows with training** — the initial BP advantage (+5.5%) diminishes as the unary head learns. BP's value may be in faster convergence rather than final accuracy.
 
 ---
 

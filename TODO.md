@@ -16,7 +16,16 @@
 - Run winner of ablation A/B/C for 100 epochs
 - Loss was still decreasing at 10 epochs (0.84 → 0.55)
 
-### 2. Dense contrastive learning (PixelCL)
+### 2. Confidence-gated BP (fix BP hurting strong classes)
+- **Problem**: BP adds +5% overall but hurts Buildings (-5%) and Trees (-2.1%) — classes where unary is already confident and correct. BP messages from weaker neighbors drag down correct predictions.
+- **Fix**: Feed unary confidence (entropy) into the pairwise alpha_net, so the model learns when to trust unary vs BP.
+  - If unary is confident (low entropy) → α → 1 → BP preserves unary
+  - If unary is uncertain (high entropy) → α → lower → BP corrects
+- **Implementation**: Concatenate per-pixel unary entropy [B, 1, H, W] with encoder features before alpha_net. Changes alpha_net input channels from C to C+1.
+- **Expected result**: BP stops hurting Buildings/Trees, keeps helping Impervious/Low Veg/Cars. Net improvement should increase from +5% to +7-8%.
+- **Evidence that this matters**: Ablation showed Buildings 80%→75% and Trees 84%→82% after BP. These are avoidable losses.
+
+### 3. Dense contrastive learning (PixelCL)
 - Current SimCLR pulls patch-level features — Cars (1.5% of pixels) get lost
 - Dense contrastive pulls pixel-level features at same location across augmented views
 - Should improve Cars (currently 0.01% linear probe) and fine-grained features
