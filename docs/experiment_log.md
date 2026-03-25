@@ -324,7 +324,87 @@ BP added **+5.5%** at 10 epochs. Promising early signal.
 
 ---
 
+## Experiment 5: BP Diagnosis — Why BP Isn't Helping
+
+**Date**: 2026-03-25
+**Purpose**: Determine whether BP's poor contribution (+1.8%) is caused by (a) quadtree structure, (b) pairwise head not learning, or (c) insufficient training data.
+
+### Test 1: Does BP propagate horizontally?
+
+Injected a strong "building" signal at a single pixel (center of 128×128), all neighbors set to uniform/uncertain. After BP:
+
+| Location | Unary (building) | After BP | Change |
+|----------|-----------------|----------|--------|
+| Center pixel (64,64) | -0.0002 | -35.48 | **-35.48** |
+| Same 2×2 block (64,65) | -1.79 | -35.84 | -34.04 |
+| Adjacent block (64,66) | -1.79 | -36.57 | -34.78 |
+| 16 pixels away (64,80) | -1.79 | -37.86 | -36.07 |
+
+**Finding**: BP **destroyed** the building signal instead of propagating it. The 3 uncertain siblings in the 2×2 block outvoted the 1 confident pixel through the parent. The parent belief became "uncertain", which then propagated back down and overrode the correct pixel. This is correct BP behavior on a tree — majority voting through the parent — but it means **isolated correct predictions get suppressed**.
+
+### Test 2: Where does BP change predictions on real data?
+
+| Metric | Value |
+|--------|-------|
+| Total pixels analyzed | 655,360 |
+| Pixels changed by BP | 262,361 (**40.0%**) |
+| Changes at boundaries | 19,321 / 33,986 (56.8%) |
+| Changes at interior | 243,040 / 621,374 (39.1%) |
+
+**Finding**: BP changes **40% of all pixels** — this is wholesale reclassification, not subtle boundary refinement. Interior pixels change almost as often as boundary pixels (39.1% vs 56.8%). BP has no strong spatial preference — it's acting as a global class redistribution mechanism.
+
+### Test 3: Pairwise alpha spatial pattern
+
+| Metric | Value |
+|--------|-------|
+| Alpha mean | 0.628 (initialized at 0.8) |
+| Alpha std | 0.132 |
+| Alpha at boundaries | 0.602 |
+| Alpha at interior | 0.631 |
+| Boundary-interior difference | **0.029** |
+
+**Finding**: Alpha is nearly uniform across space. The model pushed it globally from 0.8 → 0.63 (wants more BP activity) but the boundary/interior difference is only 0.029. The pairwise does NOT know where class boundaries are. The alpha distribution is a sharp peak around 0.62 — almost all pixels get the same consistency strength.
+
+Visual confirmation: alpha map shows no alignment with ground truth boundaries. Red boundary contours overlaid on alpha show no correlation.
+
+### Root Cause Diagnosis
+
+```
+The quadtree BP acts as a SPATIAL AVERAGING filter, not a
+boundary-aware structured predictor.
+
+1. MAJORITY VOTING: 2×2 blocks → parent aggregation suppresses
+   minority class predictions within a block (Test 1)
+
+2. NO HORIZONTAL CONNECTIONS: pixel A can only influence pixel B
+   through their common ancestor, not directly. CRFs have direct
+   neighbor connections — quadtrees don't. (Test 1)
+
+3. WHOLESALE RECLASSIFICATION: BP changes 40% of pixels,
+   including 39% of interior pixels that should stay the same.
+   It's not refining boundaries — it's redistributing classes. (Test 2)
+
+4. ALPHA LEARNS NOTHING SPATIAL: The pairwise consistency
+   strength is uniform — the model can't distinguish boundaries
+   from interior regions. (Test 3)
+
+CONCLUSION: The quadtree is the WRONG graph structure for
+segmentation boundary refinement. The parent-child hierarchy
+captures multi-scale information but lacks the direct neighbor
+connections needed for spatial consistency. CRFs with grid
+connections (CRF-as-RNN, CRFNet) work better because they
+directly model "neighboring pixels should have the same class."
+```
+
+---
+
 ## Ruled out hypotheses (with evidence)
+
+### "Quadtree BP improves segmentation via structured inference" — MARGINAL
+- Ablation: +1.8% best, +0.4% at convergence — not significant
+- BP diagnosis: acts as spatial blur, not boundary refinement
+- Quadtree lacks horizontal connections needed for spatial consistency
+- **Status**: The quadtree BP concept works mechanically but the graph structure is wrong for this task
 
 ### "Unary head gets weak gradients through BP" — WRONG
 - **Gradient comparison test**: BP chain gradients are 10-32x STRONGER than direct path

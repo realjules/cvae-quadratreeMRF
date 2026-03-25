@@ -1,11 +1,29 @@
 """
-Compare gradient norms reaching the unary head:
-  Path A: loss(b1_final, labels) — through full BP chain (current training)
-  Path B: loss(phi_1, labels) — direct supervision (auxiliary loss)
+Measure gradient amplification through BP at multiple training stages.
 
-If Path A gradients are much weaker than Path B, the BP chain
-is diluting the signal and auxiliary loss would help.
+Tests whether the 10-32x gradient amplification we observed is:
+  - A real property of the BP computation graph (persists across stages)
+  - An initialization artifact (disappears with training)
+
+Stages:
+  1. Random init (encoder + DHBP both random)
+  2. After contrastive (trained encoder, random DHBP)
+  3. After segmentation (trained encoder + trained DHBP)
+
+For each stage, compares:
+  Path A: loss → BP chain → unary head (how training works)
+  Path B: loss → unary head directly (no BP)
+
+Usage:
+    python test_gradient_comparison.py
+    python test_gradient_comparison.py \
+        --contrastive_ckpt /path/to/contrastive_best.pth \
+        --seg_ckpt /path/to/best_segmentation.pth
 """
+
+import argparse
+import glob
+import os
 
 import torch
 import torch.nn.functional as F
@@ -13,101 +31,208 @@ from net.cvae import ContrastiveEncoder
 from net.dhbp import DHBPModule
 from net.loss import FocalLoss
 
-print("=== Gradient Comparison: BP chain vs Direct ===\n")
 
-encoder = ContrastiveEncoder(pretrained=True)
-dhbp = DHBPModule(n_classes=6)
-focal = FocalLoss(gamma=2.0, class_weights=torch.tensor([1.0, 1.5, 1.0, 1.0, 3.0, 1.2]))
+def measure_gradients(encoder, dhbp, focal, x, labels, stage_name):
+    """Measure gradient norms through BP chain vs direct path."""
+    # PATH A: Through BP chain
+    encoder.zero_grad()
+    dhbp.zero_grad()
 
-x = torch.randn(2, 3, 256, 256)
-labels = torch.randint(0, 6, (2, 256, 256))
+    p1, p2, p3 = encoder.encode(x)
+    b1_final = dhbp(p1, p2, p3)
+    b1_up = F.interpolate(b1_final, size=(256, 256), mode='bilinear', align_corners=False)
+    loss_bp = focal(b1_up, labels)
+    loss_bp.backward()
 
-# =============================================
-# PATH A: Gradient through full BP chain
-# (this is how training currently works)
-# =============================================
-encoder.zero_grad()
-dhbp.zero_grad()
+    grad_a = {
+        'unary_1.net[0]': dhbp.unary_1.net[0].weight.grad.norm().item(),
+        'unary_1.net[-1]': dhbp.unary_1.net[-1].weight.grad.norm().item(),
+        'encoder.layer1': encoder.encoder.layer1[0].conv1.weight.grad.norm().item(),
+        'encoder.layer2': encoder.encoder.layer2[0].conv1.weight.grad.norm().item(),
+    }
 
-p1, p2, p3 = encoder.encode(x)
-b1_final = dhbp(p1, p2, p3)
-b1_up = F.interpolate(b1_final, size=(256, 256), mode='bilinear', align_corners=False)
-loss_bp = focal(b1_up, labels)
-loss_bp.backward()
+    # PATH B: Direct to unary (no BP)
+    encoder.zero_grad()
+    dhbp.zero_grad()
 
-print("PATH A: loss(b1_final) — through BP chain")
-print(f"  Loss value: {loss_bp.item():.4f}")
+    p1, p2, p3 = encoder.encode(x)
+    phi_1 = dhbp.unary_1(p1)
+    phi_1 = F.log_softmax(phi_1, dim=1)
+    phi_1_up = F.interpolate(phi_1, size=(256, 256), mode='bilinear', align_corners=False)
+    loss_direct = F.cross_entropy(phi_1_up, labels)
+    loss_direct.backward()
 
-grad_a = {}
-grad_a['unary_1.net[0].weight'] = dhbp.unary_1.net[0].weight.grad.norm().item()
-grad_a['unary_1.net[3].weight'] = dhbp.unary_1.net[3].weight.grad.norm().item()
-grad_a['unary_2.net[0].weight'] = dhbp.unary_2.net[0].weight.grad.norm().item()
-grad_a['unary_3.net[0].weight'] = dhbp.unary_3.net[0].weight.grad.norm().item()
-grad_a['pairwise_12.alpha_net[0].weight'] = dhbp.pairwise_12.alpha_net[0].weight.grad.norm().item()
-grad_a['pairwise_12.residual_net[0].weight'] = dhbp.pairwise_12.residual_net[0].weight.grad.norm().item()
-grad_a['encoder.layer1[0].conv1.weight'] = encoder.encoder.layer1[0].conv1.weight.grad.norm().item()
+    grad_b = {
+        'unary_1.net[0]': dhbp.unary_1.net[0].weight.grad.norm().item(),
+        'unary_1.net[-1]': dhbp.unary_1.net[-1].weight.grad.norm().item(),
+        'encoder.layer1': encoder.encoder.layer1[0].conv1.weight.grad.norm().item(),
+        'encoder.layer2': encoder.encoder.layer2[0].conv1.weight.grad.norm().item(),
+    }
 
-for name, norm in grad_a.items():
-    print(f"    {name}: {norm:.6f}")
+    # Print results
+    print(f"\n  {stage_name}")
+    print(f"  {'Component':<25} {'BP chain':>10} {'Direct':>10} {'Ratio':>8}")
+    print(f"  {'-'*25} {'-'*10} {'-'*10} {'-'*8}")
 
-# =============================================
-# PATH B: Direct gradient to unary head
-# (what auxiliary loss would provide)
-# =============================================
-encoder.zero_grad()
-dhbp.zero_grad()
+    ratios = []
+    for name in grad_a:
+        a = grad_a[name]
+        b = grad_b[name]
+        ratio = a / b if b > 1e-10 else float('inf')
+        ratios.append(ratio)
+        print(f"  {name:<25} {a:>10.6f} {b:>10.6f} {ratio:>7.1f}x")
 
-p1, p2, p3 = encoder.encode(x)
-# Use unary output directly — no BP
-phi_1 = dhbp.unary_1(p1)
-phi_1 = F.log_softmax(phi_1, dim=1)
-phi_1_up = F.interpolate(phi_1, size=(256, 256), mode='bilinear', align_corners=False)
-loss_direct = F.cross_entropy(phi_1_up, labels)
-loss_direct.backward()
+    avg_ratio = sum(r for r in ratios if r != float('inf')) / len([r for r in ratios if r != float('inf')])
+    return avg_ratio
 
-print(f"\nPATH B: loss(phi_1) — direct to unary head")
-print(f"  Loss value: {loss_direct.item():.4f}")
 
-grad_b = {}
-grad_b['unary_1.net[0].weight'] = dhbp.unary_1.net[0].weight.grad.norm().item()
-grad_b['unary_1.net[3].weight'] = dhbp.unary_1.net[3].weight.grad.norm().item()
-grad_b['unary_2.net[0].weight'] = dhbp.unary_2.net[0].weight.grad.norm().item() if dhbp.unary_2.net[0].weight.grad is not None else 0.0
-grad_b['unary_3.net[0].weight'] = dhbp.unary_3.net[0].weight.grad.norm().item() if dhbp.unary_3.net[0].weight.grad is not None else 0.0
-grad_b['pairwise_12.alpha_net[0].weight'] = dhbp.pairwise_12.alpha_net[0].weight.grad.norm().item() if dhbp.pairwise_12.alpha_net[0].weight.grad is not None else 0.0
-grad_b['pairwise_12.residual_net[0].weight'] = dhbp.pairwise_12.residual_net[0].weight.grad.norm().item() if dhbp.pairwise_12.residual_net[0].weight.grad is not None else 0.0
-grad_b['encoder.layer1[0].conv1.weight'] = encoder.encoder.layer1[0].conv1.weight.grad.norm().item()
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--contrastive_ckpt', default=None)
+    parser.add_argument('--seg_ckpt', default=None)
+    parser.add_argument('--device', default='auto')
+    args = parser.parse_args()
 
-for name, norm in grad_b.items():
-    print(f"    {name}: {norm:.6f}")
+    if args.device == 'auto':
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device(args.device)
 
-# =============================================
-# COMPARISON
-# =============================================
-print(f"\n{'='*60}")
-print(f"COMPARISON: BP chain vs Direct")
-print(f"{'='*60}")
-print(f"{'Component':<45} {'BP chain':>10} {'Direct':>10} {'Ratio':>8}")
-print(f"{'-'*45} {'-'*10} {'-'*10} {'-'*8}")
+    focal = FocalLoss(gamma=2.0, class_weights=torch.tensor([1.0, 1.5, 1.0, 1.0, 3.0, 1.2]))
 
-for name in grad_a:
-    a = grad_a[name]
-    b = grad_b.get(name, 0.0)
-    ratio = a / b if b > 0 else float('inf') if a > 0 else 0.0
-    flag = ""
-    if b > 0 and a / b < 0.1:
-        flag = " ← 10x WEAKER through BP"
-    elif b > 0 and a / b < 0.5:
-        flag = " ← weaker through BP"
-    elif b == 0:
-        flag = " (no direct grad — only through BP)"
-    print(f"  {name:<43} {a:>10.6f} {b:>10.6f} {ratio:>7.2f}x{flag}")
+    # Fixed input for fair comparison across stages
+    torch.manual_seed(42)
+    x = torch.randn(2, 3, 256, 256, device=device)
+    labels = torch.randint(0, 6, (2, 256, 256), device=device)
 
-print(f"\nINTERPRETATION:")
-unary1_ratio = grad_a['unary_1.net[0].weight'] / grad_b['unary_1.net[0].weight'] if grad_b['unary_1.net[0].weight'] > 0 else 0
-if unary1_ratio < 0.1:
-    print(f"  Unary gradients are {1/unary1_ratio:.0f}x WEAKER through BP → auxiliary loss NEEDED")
-elif unary1_ratio < 0.5:
-    print(f"  Unary gradients are {1/unary1_ratio:.1f}x weaker through BP → auxiliary loss would help")
-else:
-    print(f"  Unary gradients are comparable ({unary1_ratio:.2f}x) → auxiliary loss NOT needed")
-    print(f"  The unary collapse is caused by something else (data, initialization, etc.)")
+    print("=" * 60)
+    print("GRADIENT AMPLIFICATION: BP chain vs Direct")
+    print("Is the 10-32x amplification real or an init artifact?")
+    print("=" * 60)
+
+    results = {}
+
+    # =========================================================
+    # Stage 1: Random init
+    # =========================================================
+    encoder = ContrastiveEncoder(pretrained=True).to(device)  # ImageNet pretrained
+    dhbp = DHBPModule(n_classes=6).to(device)
+    ratio = measure_gradients(encoder, dhbp, focal, x, labels, "STAGE 1: Random DHBP + pretrained encoder")
+    results['random_init'] = ratio
+    del encoder, dhbp
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    # =========================================================
+    # Stage 2: After contrastive (if checkpoint provided)
+    # =========================================================
+    if args.contrastive_ckpt:
+        encoder = ContrastiveEncoder(pretrained=True).to(device)
+        ckpt_path = args.contrastive_ckpt
+        if os.path.isdir(ckpt_path):
+            ckpt_path = glob.glob(os.path.join(ckpt_path, "*.pth"))[0]
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        encoder.load_state_dict(ckpt['encoder_state_dict'])
+        dhbp = DHBPModule(n_classes=6).to(device)  # DHBP still random
+        ratio = measure_gradients(encoder, dhbp, focal, x, labels,
+                                  f"STAGE 2: Random DHBP + contrastive encoder (epoch {ckpt.get('epoch', '?')})")
+        results['after_contrastive'] = ratio
+        del encoder, dhbp
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    # =========================================================
+    # Stage 3: After segmentation (if checkpoint provided)
+    # =========================================================
+    if args.seg_ckpt:
+        encoder = ContrastiveEncoder(pretrained=True).to(device)
+        dhbp = DHBPModule(n_classes=6).to(device)
+        seg_path = args.seg_ckpt
+        if os.path.isdir(seg_path):
+            seg_path = glob.glob(os.path.join(seg_path, "*.pth"))[0]
+        seg = torch.load(seg_path, map_location=device, weights_only=False)
+        if 'encoder_state_dict' in seg:
+            encoder.load_state_dict(seg['encoder_state_dict'])
+        if 'dhbp_state_dict' in seg:
+            dhbp.load_state_dict(seg['dhbp_state_dict'])
+        ratio = measure_gradients(encoder, dhbp, focal, x, labels,
+                                  "STAGE 3: Trained DHBP + fine-tuned encoder (50 epochs)")
+        results['after_segmentation'] = ratio
+        del encoder, dhbp
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    # =========================================================
+    # Stage 4: Multiple random seeds (same stage 1, different inits)
+    # =========================================================
+    print(f"\n  STAGE 4: Random seed variation (5 seeds)")
+    print(f"  {'Seed':<10} {'Avg ratio':>10}")
+    print(f"  {'-'*10} {'-'*10}")
+    seed_ratios = []
+    for seed in [0, 1, 2, 3, 4]:
+        torch.manual_seed(seed)
+        encoder = ContrastiveEncoder(pretrained=True).to(device)
+        dhbp = DHBPModule(n_classes=6).to(device)
+        # Also randomize input
+        x_seed = torch.randn(2, 3, 256, 256, device=device)
+        labels_seed = torch.randint(0, 6, (2, 256, 256), device=device)
+
+        # Quick measure (no print)
+        encoder.zero_grad(); dhbp.zero_grad()
+        p1, p2, p3 = encoder.encode(x_seed)
+        b1 = dhbp(p1, p2, p3)
+        b1_up = F.interpolate(b1, size=(256, 256), mode='bilinear', align_corners=False)
+        focal(b1_up, labels_seed).backward()
+        ga = dhbp.unary_1.net[0].weight.grad.norm().item()
+
+        encoder.zero_grad(); dhbp.zero_grad()
+        p1, p2, p3 = encoder.encode(x_seed)
+        phi = F.log_softmax(dhbp.unary_1(p1), dim=1)
+        phi_up = F.interpolate(phi, size=(256, 256), mode='bilinear', align_corners=False)
+        F.cross_entropy(phi_up, labels_seed).backward()
+        gb = dhbp.unary_1.net[0].weight.grad.norm().item()
+
+        r = ga / gb if gb > 1e-10 else float('inf')
+        seed_ratios.append(r)
+        print(f"  {seed:<10} {r:>10.1f}x")
+
+        del encoder, dhbp
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    results['seed_mean'] = sum(seed_ratios) / len(seed_ratios)
+    results['seed_std'] = (sum((r - results['seed_mean'])**2 for r in seed_ratios) / len(seed_ratios)) ** 0.5
+
+    # =========================================================
+    # SUMMARY
+    # =========================================================
+    print(f"\n{'='*60}")
+    print(f"SUMMARY: Gradient amplification through BP")
+    print(f"{'='*60}")
+    print(f"  Random init:            {results.get('random_init', 'N/A'):.1f}x" if isinstance(results.get('random_init'), float) else "")
+    if 'after_contrastive' in results:
+        print(f"  After contrastive:      {results['after_contrastive']:.1f}x")
+    if 'after_segmentation' in results:
+        print(f"  After segmentation:     {results['after_segmentation']:.1f}x")
+    print(f"  Across 5 random seeds:  {results['seed_mean']:.1f}x ± {results['seed_std']:.1f}x")
+
+    print(f"\n  VERDICT:")
+    all_ratios = [results.get('random_init', 0)]
+    if 'after_contrastive' in results:
+        all_ratios.append(results['after_contrastive'])
+    if 'after_segmentation' in results:
+        all_ratios.append(results['after_segmentation'])
+
+    min_r = min(r for r in all_ratios if r > 0)
+    max_r = max(all_ratios)
+
+    if min_r > 3.0:
+        print(f"    → Amplification is CONSISTENT across all stages ({min_r:.1f}x - {max_r:.1f}x)")
+        print(f"    → This is a REAL property of the BP computation graph")
+        print(f"    → Not an initialization artifact")
+    elif min_r > 1.5:
+        print(f"    → Amplification exists but VARIES across stages ({min_r:.1f}x - {max_r:.1f}x)")
+        print(f"    → Partially a graph property, partially affected by training")
+    else:
+        print(f"    → Amplification DISAPPEARS with training ({min_r:.1f}x - {max_r:.1f}x)")
+        print(f"    → It was an initialization artifact")
+
+
+if __name__ == "__main__":
+    main()
