@@ -559,6 +559,8 @@ def main():
                              'If not provided, uses random DHBP weights.')
     parser.add_argument('--data_dir', default='./input')
     parser.add_argument('--output_dir', default='./output/eval')
+    parser.add_argument('--diagonal_pairwise', action='store_true',
+                        help='Use DiagonalPairwiseHead (must match saved checkpoint)')
     parser.add_argument('--device', default='auto')
     args = parser.parse_args()
 
@@ -575,7 +577,7 @@ def main():
     encoder = load_encoder(args.contrastive_ckpt, device)
 
     # Load DHBP
-    dhbp = DHBPModule(n_classes=6).to(device)
+    dhbp = DHBPModule(n_classes=6, diagonal_pairwise=args.diagonal_pairwise).to(device)
     if args.seg_ckpt:
         print(f"Loading trained DHBP from {args.seg_ckpt}")
         seg_ckpt_path = args.seg_ckpt

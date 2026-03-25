@@ -36,7 +36,7 @@ from net.cvae import ContrastiveEncoder
 from net.dhbp import DHBPModule
 
 
-def load_models(contrastive_ckpt, seg_ckpt, device):
+def load_models(contrastive_ckpt, seg_ckpt, device, diagonal_pairwise=False):
     """Load encoder and DHBP from checkpoints."""
     encoder = ContrastiveEncoder(pretrained=True)
 
@@ -47,7 +47,7 @@ def load_models(contrastive_ckpt, seg_ckpt, device):
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     encoder.load_state_dict(ckpt['encoder_state_dict'])
 
-    dhbp = DHBPModule(n_classes=6)
+    dhbp = DHBPModule(n_classes=6, diagonal_pairwise=diagonal_pairwise)
 
     if seg_ckpt:
         seg_path = seg_ckpt
@@ -363,12 +363,27 @@ def test_alpha_spatial(encoder, dhbp, device, output_dir, data_dir="./input"):
 
     p1, p2, p3 = encoder.encode(images)
 
-    # Get alpha directly from pairwise head
-    alpha_12 = torch.sigmoid(dhbp.pairwise_12.alpha_net(p2))  # [1, 1, 64, 64]
-    alpha_23 = torch.sigmoid(dhbp.pairwise_23.alpha_net(p3))  # [1, 1, 32, 32]
+    # Get pairwise info — depends on head type
+    has_alpha = hasattr(dhbp.pairwise_12, 'alpha_net')
 
-    alpha_12_np = alpha_12[0, 0].cpu().numpy()
-    alpha_23_np = alpha_23[0, 0].cpu().numpy()
+    if has_alpha:
+        # α·I + (1-α)·R pairwise: extract alpha
+        alpha_12 = torch.sigmoid(dhbp.pairwise_12.alpha_net(p2))  # [1, 1, 64, 64]
+        alpha_23 = torch.sigmoid(dhbp.pairwise_23.alpha_net(p3))  # [1, 1, 32, 32]
+        alpha_12_np = alpha_12[0, 0].cpu().numpy()
+        alpha_23_np = alpha_23[0, 0].cpu().numpy()
+    else:
+        # DiagonalPairwiseHead: extract diagonal scaling values
+        d_12 = F.softplus(dhbp.pairwise_12.net(p2))  # [1, K, 64, 64]
+        d_23 = F.softplus(dhbp.pairwise_23.net(p3))  # [1, K, 32, 32]
+        # Use mean across classes as a proxy for "consistency strength"
+        alpha_12_np = d_12[0].mean(dim=0).cpu().numpy()  # [64, 64]
+        alpha_23_np = d_23[0].mean(dim=0).cpu().numpy()  # [32, 32]
+        print(f"\n  Diagonal scaling values (d) per class:")
+        for k, name in enumerate(["Imp", "Bldg", "Low", "Tree", "Car", "Clut"]):
+            d_mean = d_12[0, k].mean().item()
+            d_std = d_12[0, k].std().item()
+            print(f"    {name}: mean={d_mean:.4f}, std={d_std:.4f}")
 
     # Detect boundaries at level 2 resolution
     labels_64 = F.interpolate(
@@ -464,6 +479,8 @@ def main():
     parser.add_argument('--seg_ckpt', default=None)
     parser.add_argument('--data_dir', default='./input')
     parser.add_argument('--output_dir', default='./output/bp_diagnosis')
+    parser.add_argument('--diagonal_pairwise', action='store_true',
+                        help='Use DiagonalPairwiseHead (must match saved checkpoint)')
     parser.add_argument('--device', default='auto')
     args = parser.parse_args()
 
@@ -473,7 +490,8 @@ def main():
         device = torch.device(args.device)
     os.makedirs(args.output_dir, exist_ok=True)
 
-    encoder, dhbp = load_models(args.contrastive_ckpt, args.seg_ckpt, device)
+    encoder, dhbp = load_models(args.contrastive_ckpt, args.seg_ckpt, device,
+                                diagonal_pairwise=args.diagonal_pairwise)
 
     # Test 1: Horizontal propagation (synthetic)
     test_horizontal_propagation(dhbp, device, args.output_dir)
