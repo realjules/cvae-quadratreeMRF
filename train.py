@@ -42,6 +42,7 @@ class SegmentationTrainer:
         use_bp: bool = True,
         simple_unary: bool = False,
         diagonal_pairwise: bool = False,
+        n_levels: int = 3,
     ):
         self.device = device
         self.n_classes = n_classes
@@ -49,7 +50,7 @@ class SegmentationTrainer:
         self.encoder = encoder.to(device)
         self.dhbp = DHBPModule(
             n_classes=n_classes, simple_unary=simple_unary,
-            diagonal_pairwise=diagonal_pairwise,
+            diagonal_pairwise=diagonal_pairwise, n_levels=n_levels,
         ).to(device)
         self.criterion = SegmentationLoss(n_classes=n_classes).to(device)
 

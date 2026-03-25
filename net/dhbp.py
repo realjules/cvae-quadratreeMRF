@@ -316,24 +316,38 @@ class DHBPModule(nn.Module):
     """
 
     def __init__(self, n_classes: int = 6, simple_unary: bool = False,
-                 diagonal_pairwise: bool = False):
+                 diagonal_pairwise: bool = False, n_levels: int = 3):
         super().__init__()
         self.n_classes = n_classes
+        self.n_levels = n_levels
 
         # Unary potential heads (features → log class probabilities)
         UHead = SimpleUnaryHead if simple_unary else UnaryPotentialHead
         if simple_unary:
             print("DHBP: using SimpleUnaryHead (Conv1x1 linear projection)")
-        self.unary_1 = UHead(64, n_classes)    # fine: 128×128
-        self.unary_2 = UHead(128, n_classes)   # mid: 64×64
-        self.unary_3 = UHead(256, n_classes)   # coarse: 32×32
 
-        # Pairwise potential heads (features → K×K log-compatibility)
+        # Pairwise potential heads
         PHead = DiagonalPairwiseHead if diagonal_pairwise else PairwisePotentialHead
         if diagonal_pairwise:
             print("DHBP: using DiagonalPairwiseHead (no class mixing)")
-        self.pairwise_12 = PHead(128, n_classes)  # edge 1↔2, uses p2
-        self.pairwise_23 = PHead(256, n_classes)  # edge 2↔3, uses p3
+
+        print(f"DHBP: {n_levels} levels")
+
+        # Always need levels 1 and 2
+        self.unary_1 = UHead(64, n_classes)     # fine: 128×128
+        self.unary_2 = UHead(128, n_classes)    # mid: 64×64
+        self.pairwise_12 = PHead(128, n_classes)
+
+        # Level 3 (32×32) — used when n_levels >= 3
+        if n_levels >= 3:
+            self.unary_3 = UHead(256, n_classes)
+            self.pairwise_23 = PHead(256, n_classes)
+
+        # Level 4 (16×16) — pool p3 to create p4
+        if n_levels >= 4:
+            self.pool_34 = nn.AvgPool2d(2)
+            self.unary_4 = UHead(256, n_classes)  # same channels as p3
+            self.pairwise_34 = PHead(256, n_classes)
 
     def forward(
         self,
@@ -349,38 +363,80 @@ class DHBPModule(nn.Module):
             p3: [B, 256,  32,  32] coarse-scale encoder features
 
         Returns:
-            logits: [B, n_classes, 128, 128] — final beliefs at finest level,
-                    valid as logits for cross_entropy (unnormalized log-probs)
+            logits: [B, n_classes, 128, 128] — final beliefs at finest level
         """
-        # === Step 0: Compute potentials from encoder features ===
-        phi_1 = self.unary_1(p1)          # [B, K, 128, 128]
-        phi_2 = self.unary_2(p2)          # [B, K,  64,  64]
-        phi_3 = self.unary_3(p3)          # [B, K,  32,  32]
+        if self.n_levels == 2:
+            return self._forward_2_levels(p1, p2)
+        elif self.n_levels == 3:
+            return self._forward_3_levels(p1, p2, p3)
+        elif self.n_levels == 4:
+            return self._forward_4_levels(p1, p2, p3)
+        else:
+            raise ValueError(f"n_levels must be 2, 3, or 4, got {self.n_levels}")
 
-        psi_12 = self.pairwise_12(p2)     # [B, K, K, 64, 64]
-        psi_23 = self.pairwise_23(p3)     # [B, K, K, 32, 32]
+    def _forward_2_levels(self, p1, p2):
+        """2 levels: 128×128 ↔ 64×64. One edge, minimal blur."""
+        phi_1 = self.unary_1(p1)
+        phi_2 = self.unary_2(p2)
+        psi_12 = self.pairwise_12(p2)
 
-        # === Step 1: Initialize leaf beliefs ===
-        b1 = phi_1                        # [B, K, 128, 128]
-
-        # === Step 2: Bottom-up pass (leaves → root) ===
-        # Level 1 → Level 2
+        b1 = phi_1
         msg_up_12, per_child_12 = _child_to_parent(b1, psi_12)
-        b2 = phi_2 + msg_up_12            # [B, K, 64, 64]
+        b2 = phi_2 + msg_up_12  # root
 
-        # Level 2 → Level 3
+        msg_dn_12 = _parent_to_child(b2, per_child_12, psi_12)
+        b1_final = phi_1 + msg_dn_12
+        return b1_final
+
+    def _forward_3_levels(self, p1, p2, p3):
+        """3 levels: 128×128 ↔ 64×64 ↔ 32×32. Current default."""
+        phi_1 = self.unary_1(p1)
+        phi_2 = self.unary_2(p2)
+        phi_3 = self.unary_3(p3)
+        psi_12 = self.pairwise_12(p2)
+        psi_23 = self.pairwise_23(p3)
+
+        b1 = phi_1
+        msg_up_12, per_child_12 = _child_to_parent(b1, psi_12)
+        b2 = phi_2 + msg_up_12
         msg_up_23, per_child_23 = _child_to_parent(b2, psi_23)
-        b3 = phi_3 + msg_up_23            # [B, K, 32, 32]  (root belief)
+        b3 = phi_3 + msg_up_23
 
-        # === Step 3: Top-down pass (root → leaves) ===
-        # Level 3 → Level 2
         msg_dn_23 = _parent_to_child(b3, per_child_23, psi_23)
-        b2_final = phi_2 + msg_up_12 + msg_dn_23   # [B, K, 64, 64]
-
-        # Level 2 → Level 1
+        b2_final = phi_2 + msg_up_12 + msg_dn_23
         msg_dn_12 = _parent_to_child(b2_final, per_child_12, psi_12)
-        b1_final = phi_1 + msg_dn_12      # [B, K, 128, 128]
+        b1_final = phi_1 + msg_dn_12
+        return b1_final
 
+    def _forward_4_levels(self, p1, p2, p3):
+        """4 levels: 128×128 ↔ 64×64 ↔ 32×32 ↔ 16×16. Maximum depth."""
+        # Create p4 by pooling p3
+        p4 = self.pool_34(p3)  # [B, 256, 16, 16]
+
+        phi_1 = self.unary_1(p1)
+        phi_2 = self.unary_2(p2)
+        phi_3 = self.unary_3(p3)
+        phi_4 = self.unary_4(p4)
+        psi_12 = self.pairwise_12(p2)
+        psi_23 = self.pairwise_23(p3)
+        psi_34 = self.pairwise_34(p4)
+
+        # Bottom-up
+        b1 = phi_1
+        msg_up_12, per_child_12 = _child_to_parent(b1, psi_12)
+        b2 = phi_2 + msg_up_12
+        msg_up_23, per_child_23 = _child_to_parent(b2, psi_23)
+        b3 = phi_3 + msg_up_23
+        msg_up_34, per_child_34 = _child_to_parent(b3, psi_34)
+        b4 = phi_4 + msg_up_34  # root
+
+        # Top-down
+        msg_dn_34 = _parent_to_child(b4, per_child_34, psi_34)
+        b3_final = phi_3 + msg_up_23 + msg_dn_34
+        msg_dn_23 = _parent_to_child(b3_final, per_child_23, psi_23)
+        b2_final = phi_2 + msg_up_12 + msg_dn_23
+        msg_dn_12 = _parent_to_child(b2_final, per_child_12, psi_12)
+        b1_final = phi_1 + msg_dn_12
         return b1_final
 
     @torch.no_grad()

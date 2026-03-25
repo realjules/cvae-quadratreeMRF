@@ -297,6 +297,8 @@ def main():
                         help='Ablation: use single Conv1x1 instead of 2-layer unary head')
     parser.add_argument('--diagonal_pairwise', action='store_true',
                         help='Ablation: hard diagonal pairwise (no class mixing)')
+    parser.add_argument('--n_levels', type=int, default=3,
+                        help='Number of quadtree levels (2, 3, or 4)')
     parser.add_argument('--device', default='auto')
     args = parser.parse_args()
 
@@ -375,6 +377,7 @@ def main():
         use_bp=use_bp,
         simple_unary=args.simple_unary,
         diagonal_pairwise=args.diagonal_pairwise,
+        n_levels=args.n_levels,
     )
 
     if args.epochs_seg > 0:
