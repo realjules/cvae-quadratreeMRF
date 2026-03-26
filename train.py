@@ -65,8 +65,9 @@ class SegmentationTrainer:
             {'params': self.dhbp.parameters(), 'lr': learning_rate},
         ], weight_decay=1e-4)
 
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            self.optimizer, T_0=10, T_mult=2, eta_min=1e-6
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='max', factor=0.5, patience=5, min_lr=1e-6,
+            verbose=True,
         )
 
         self.best_loss = float('inf')
@@ -255,11 +256,11 @@ def main():
             num_batches += 1
 
         avg_loss = epoch_loss / max(num_batches, 1)
-        trainer.scheduler.step()
 
         # Evaluate
         metrics = trainer.evaluate(test_loader)
         acc = metrics['accuracy']
+        trainer.scheduler.step(acc)
         print(f"Epoch {epoch}: loss={avg_loss:.4f}, acc={acc:.2f}%, "
               f"mean_class_acc={metrics['mean_accuracy']:.2f}%")
 

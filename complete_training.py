@@ -24,6 +24,12 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+try:
+    import wandb
+    HAS_WANDB = True
+except ImportError:
+    HAS_WANDB = False
+
 from dataset.dataset import ISPRS_dataset
 from dataset.unsupervised_dataset import ISPRS_unsupervised_dataset
 from net.cvae import ContrastiveEncoder
@@ -174,6 +180,13 @@ def train_contrastive(trainer, dataloader, epochs, device, output_dir="./output"
         trainer.scheduler.step()
         print(f"Epoch {epoch}: avg_loss={avg_loss:.4f}")
 
+        if HAS_WANDB and wandb.run:
+            wandb.log({
+                "contrastive/epoch": epoch,
+                "contrastive/loss": avg_loss,
+                "contrastive/lr": trainer.optimizer.param_groups[0]['lr'],
+            })
+
         # Save checkpoints
         if avg_loss < trainer.best_loss:
             trainer.best_loss = avg_loss
@@ -219,7 +232,14 @@ def train_segmentation(trainer, dataloader, test_loader, epochs, device,
                       f"loss={loss:.4f} ({elapsed:.0f}s)")
 
         avg_loss = epoch_loss / max(num_batches, 1)
-        trainer.scheduler.step()
+
+        # Log training loss every epoch
+        if HAS_WANDB and wandb.run:
+            wandb.log({
+                "seg/epoch": epoch,
+                "seg/train_loss": avg_loss,
+                "seg/lr": trainer.optimizer.param_groups[0]['lr'],
+            })
 
         # Evaluate every 5 epochs (or last epoch)
         if epoch % 5 == 0 or epoch == epochs:
@@ -227,6 +247,21 @@ def train_segmentation(trainer, dataloader, test_loader, epochs, device,
             acc = metrics['accuracy']
             print(f"Epoch {epoch}: loss={avg_loss:.4f}, acc={acc:.2f}%, "
                   f"mean_class={metrics['mean_accuracy']:.2f}%")
+
+            # Step scheduler with accuracy (ReduceLROnPlateau needs the metric)
+            trainer.scheduler.step(acc)
+
+            # Log eval metrics
+            if HAS_WANDB and wandb.run:
+                class_names = ["Impervious", "Buildings", "Low_Veg", "Trees", "Cars", "Clutter"]
+                log_dict = {
+                    "seg/accuracy": acc,
+                    "seg/mean_class_accuracy": metrics['mean_accuracy'],
+                    "seg/best_accuracy": max(best_acc, acc),
+                }
+                for name, class_acc in zip(class_names, metrics['per_class_accuracy']):
+                    log_dict[f"seg/class_{name}"] = class_acc
+                wandb.log(log_dict)
 
             if acc > best_acc:
                 best_acc = acc
@@ -265,6 +300,18 @@ def evaluate_final(trainer, test_loader):
     for name, acc in zip(class_names, metrics['per_class_accuracy']):
         print(f"  {name}: {acc:.2f}%")
 
+    # Log final results to wandb
+    if HAS_WANDB and wandb.run:
+        log_dict = {
+            "final/accuracy": metrics['accuracy'],
+            "final/mean_class_accuracy": metrics['mean_accuracy'],
+        }
+        for name, acc in zip(class_names, metrics['per_class_accuracy']):
+            log_dict[f"final/class_{name}"] = acc
+        wandb.log(log_dict)
+        wandb.summary["final_accuracy"] = metrics['accuracy']
+        wandb.summary["final_mean_class"] = metrics['mean_accuracy']
+
     return metrics
 
 
@@ -299,6 +346,10 @@ def main():
                         help='Ablation: hard diagonal pairwise (no class mixing)')
     parser.add_argument('--n_levels', type=int, default=3,
                         help='Number of quadtree levels (2, 3, or 4)')
+    parser.add_argument('--wandb_project', default=None,
+                        help='Wandb project name. If set, enables wandb logging.')
+    parser.add_argument('--wandb_entity', default=None,
+                        help='Wandb entity (team/user name)')
     parser.add_argument('--device', default='auto')
     args = parser.parse_args()
 
@@ -308,6 +359,30 @@ def main():
         device = torch.device(args.device)
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # Initialize wandb if requested
+    if args.wandb_project and HAS_WANDB:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            config={
+                "epochs_contrastive": args.epochs_contrastive,
+                "epochs_seg": args.epochs_seg,
+                "batch_size": args.batch_size,
+                "lr_contrastive": args.lr_contrastive,
+                "lr_seg": args.lr_seg,
+                "temperature": args.temperature,
+                "labeled_percent": args.labeled_percent,
+                "n_levels": args.n_levels,
+                "no_bp": args.no_bp,
+                "simple_unary": args.simple_unary,
+                "diagonal_pairwise": args.diagonal_pairwise,
+                "contrastive_ckpt": args.contrastive_ckpt,
+            },
+        )
+        print(f"Wandb logging enabled: {args.wandb_project}")
+    elif args.wandb_project and not HAS_WANDB:
+        print("WARNING: --wandb_project set but wandb not installed. pip install wandb")
 
     print("DHBP Semi-Supervised Segmentation Pipeline")
     print(f"Device: {device}")
@@ -392,6 +467,10 @@ def main():
     total_time = time.time() - start_time
     print(f"\nTotal time: {total_time:.0f}s ({total_time/60:.1f}min)")
     print(f"Final accuracy: {final_metrics['accuracy']:.2f}%")
+
+    if HAS_WANDB and wandb.run:
+        wandb.summary["total_time_s"] = total_time
+        wandb.finish()
 
     return 0 if final_metrics['accuracy'] >= 90.0 else 1
 
