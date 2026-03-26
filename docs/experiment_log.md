@@ -771,44 +771,67 @@ This technique:     adds COMPUTATION PATHS → amplifies gradients (7-10x),
 4. **Multi-task learning** — lagging task heads get amplified gradients, naturally balancing task convergence.
 5. **Compute-constrained training** — 10 epochs × 1.2x cost = 12 units vs 50 epochs × 1.0x = 50 units. Net 76% compute savings.
 
+### Status of claims
+
+```
+PROVEN:
+  ✓ Gradient amplification is real (7-10x, verified across 3 stages, 5 seeds)
+  ✓ Scales with depth (7.4x → 16.6x → 22.6x, ~2x per level)
+  ✓ BP helps convergence speed (60.5% at 10ep vs 54.9% without)
+  ✓ Entropy-weighted BP helps all classes (+4% overall, no class hurt)
+
+DISPROVEN:
+  ✗ "Train with BP, remove at inference" — unary becomes lazy
+    BP-trained unary: 36.7% vs no-BP-trained unary: 62.0%
+    The encoder relies on BP instead of learning independently
+    BP creates DEPENDENCY, not a temporary scaffold
+
+STILL OPEN:
+  ? Does a DIFFERENT multi-path module avoid the dependency?
+  ? Does the amplification generalize to other tasks/architectures?
+  ? Can we design a module that amplifies WITHOUT making the unary lazy?
+  ? Is the amplification useful for foundation model fine-tuning?
+```
+
+### The dependency problem and potential fixes
+
+The "remove at inference" hypothesis failed because BP takes OVER the prediction — the unary head learns "BP will fix my mistakes, so why try?" Three potential designs might avoid this:
+
+1. **Auxiliary loss on unary** — force the unary to be good independently while BP still amplifies gradients. Loss = CE(BP_output) + 0.5 × CE(unary_output). The unary can't be lazy because it has its own loss.
+
+2. **Gradual BP removal** — start with full BP, reduce BP weight over training (like scheduled dropout). Early epochs: BP amplifies gradients. Late epochs: BP fades, unary must work alone. The transition teaches the unary to be independent.
+
+3. **Detached BP for gradient routing** — use BP for gradient amplification but DON'T let BP output reach the loss. Only the unary output counts for the loss. BP's multi-path structure still creates gradient amplification through the computation graph, but the unary is always responsible for the final prediction. This is the cleanest separation of "gradient routing" from "inference."
+
 ### What's needed to publish this (NeurIPS-level)
 
 | Requirement | Status |
 |---|---|
-| Gradient amplification measured | Done (7-10x, verified) |
-| Convergence speedup shown | Partial (1 task) |
-| "Remove at inference" proof | Pending (tonight's experiment) |
-| 3+ tasks (segmentation, detection, depth) | Needed |
-| 2+ architectures (ResNet, ViT) | Needed |
-| Head-to-head vs deep supervision | Needed |
-| Simplified module (10 lines, not 100) | Needed |
-| Theoretical analysis of amplification factor | Needed |
+| Gradient amplification measured | ✓ Done (7-10x, verified) |
+| Convergence speedup shown | ✓ Partial (1 task) |
+| "Remove at inference" proof | ✗ FAILED — dependency created |
+| Fix dependency (aux loss / gradual / detached) | ? Open — needs experiments |
+| 3+ tasks (segmentation, detection, depth) | ? Needed |
+| 2+ architectures (ResNet, ViT) | ? Needed |
+| Head-to-head vs deep supervision | ? Needed |
+| Simplified module (10 lines, not 100) | ? Needed |
+| Theoretical analysis of amplification factor | ? Needed |
 
-### Simplified module concept (untested)
+### Paper framing (revised after failed hypothesis)
 
-```python
-# "Gradient Amplification Module" — conceptual
-# 1. Reshape features into 2×2 blocks
-# 2. Pool (creates multi-path gradient flow)
-# 3. Unpool back
-# 4. Weight by confidence (entropy-based attention)
-# 5. Add back to original features
-# Training: include module (7-10x gradient amplification)
-# Inference: remove module (zero cost)
-```
+Original: *"Hierarchical Gradient Amplification: A Parameter-Free Training Module for Faster Fine-Tuning"* — claimed removable at inference. **INVALIDATED.**
 
-### Paper framing
+Revised option A: *"Understanding Gradient Amplification in Differentiable Structured Prediction"* — analysis paper. Document the amplification phenomenon, characterize it, explain why it creates dependency. No claim about practical utility, just understanding. Lower impact but honest.
 
-*"Hierarchical Gradient Amplification: A Parameter-Free Training Module for Faster Fine-Tuning"*
+Revised option B: *"Decoupled Gradient Amplification: Multi-Path Training Without Inference Dependency"* — solve the dependency problem with one of the three fixes above. If it works, the original claim is restored. Higher impact but needs more experiments.
 
-Not about segmentation. Not about MRFs. About faster training through multi-path gradient routing — applicable to any spatial neural network.
+### Key risks (updated)
 
-### Key risks
-
-- Deep supervision comparison may show similar benefits
+- ~~"Remove at inference" claim may not hold~~ → **CONFIRMED: it doesn't hold**
+- Deep supervision comparison may show similar benefits AND similar dependency
+- The dependency may be inherent to any multi-path gradient amplification (not fixable)
 - Amplification may not generalize beyond quadtree structure
 - Simplified module may not retain 7-10x amplification
-- "Remove at inference" claim may not hold (tonight's experiment is critical)
 
 ---
 
