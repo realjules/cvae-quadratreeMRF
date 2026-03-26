@@ -67,7 +67,6 @@ class SegmentationTrainer:
 
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode='max', factor=0.5, patience=5, min_lr=1e-6,
-            verbose=True,
         )
 
         self.best_loss = float('inf')
