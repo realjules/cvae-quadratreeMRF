@@ -711,6 +711,64 @@ Model B: trained WITHOUT BP, evaluated WITHOUT BP  = 62.04%
 | **10** | **Entropy BP, 10%, 50ep** | **66.02%** | **57.88%** | **+4.0%** |
 | **11** | **Entropy BP, 30%, 25ep** | **69.59%** | **64.29%** | — |
 | **12** | **Entropy BP 2-lev, 10%, 25ep** | **62.91%** | **54.32%** | — |
+| **13** | **Entropy BP, ReduceLROnPlateau p=5, 10%, 50ep** | **66.45%** | **60.09%** | — |
+| **14** | **Entropy BP, ReduceLROnPlateau p=3, 10%, 120ep** | **67.76%** | **64.05%** | — |
+
+---
+
+## Experiment 13: ReduceLROnPlateau (patience=5, 50 epochs)
+
+**Date**: 2026-03-26
+**Change**: Replaced CosineAnnealingWarmRestarts with ReduceLROnPlateau(mode='max', factor=0.5, patience=5).
+
+| | Cosine (50ep) | Plateau p=5 (50ep) |
+|---|---|---|
+| Best | 66.02% | **66.45%** |
+| Final | 57.88% | **60.09%** |
+| Degradation | -8.1% | **-6.4%** |
+| Cars | 26.52% | **32.76%** |
+| Buildings | 79.24% | **92.40%** |
+
+**Finding**: Less degradation (6.4% vs 8.1%), better final numbers, best-ever Cars (32.8%) and Buildings (92.4%). But LR never actually dropped during 50 epochs — patience=5 with eval every 5 epochs = 25 epoch wait, too long for 50 epochs total.
+
+---
+
+## Experiment 14: ReduceLROnPlateau (patience=3, 120 epochs) — with wandb
+
+**Date**: 2026-03-26
+**Change**: Reduced patience to 3, extended to 120 epochs. Full wandb logging.
+
+### Results
+
+| Metric | Value |
+|---|---|
+| Best accuracy | **67.76%** (epoch 15) |
+| Final accuracy | **64.05%** (epoch 90, early stopped) |
+| Degradation | -3.7% (best improvement) |
+| Mean class (final) | **49.17%** |
+| Cars (final) | 31.15% |
+| Buildings (final) | 83.64% |
+| Low Veg (final) | **57.91%** (best ever) |
+| Early stopping | Triggered at epoch 90 (15 evals without improvement) |
+
+### Wandb insights
+
+- **LR dropped 2-3 times** (visible in seg/lr graph): 0.0001 → 0.00005 → 0.000025
+- **Best accuracy hit at epoch 15 and never improved again** despite 75 more epochs and multiple LR reductions
+- **Per-class oscillation**: all classes oscillate wildly (Impervious 30-65%, Low Veg 20-60%, Cars 15-35%) — overfitting to 1 labeled area causes variance
+- **Train loss kept decreasing** (0.76 → 0.25) while accuracy plateaued — classic overfitting signal
+
+### Key conclusion
+
+**The model hits its ceiling (~67-68%) within the first 15 epochs regardless of scheduler, LR drops, or training length.** The ceiling comes from:
+
+1. **Encoder quality** — linear probe 71.5%, hard limit on downstream accuracy
+2. **One labeled area** — 200 patches from 1 neighborhood, model overfits and oscillates
+3. **No training trick fixes these** — scheduler, patience, more epochs, LR drops all tried
+
+The next meaningful improvement requires either:
+- More labeled data (30% = 3 areas → 69.6% best already demonstrated)
+- Better encoder (DINOv2, longer contrastive, ResNet-50)
 
 ---
 
