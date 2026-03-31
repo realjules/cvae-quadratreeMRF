@@ -351,7 +351,15 @@ def main():
     parser.add_argument('--wandb_entity', default=None,
                         help='Wandb entity (team/user name)')
     parser.add_argument('--device', default='auto')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducibility')
     args = parser.parse_args()
+
+    # Set random seeds for reproducibility
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     if args.device == 'auto':
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -378,6 +386,7 @@ def main():
                 "simple_unary": args.simple_unary,
                 "diagonal_pairwise": args.diagonal_pairwise,
                 "contrastive_ckpt": args.contrastive_ckpt,
+                "seed": args.seed,
             },
         )
         print(f"Wandb logging enabled: {args.wandb_project}")

@@ -901,11 +901,11 @@ Revised option B: *"Decoupled Gradient Amplification: Multi-Path Training Withou
 - The majority voting problem was the bottleneck, not BP itself
 - With proper child weighting, BP is a meaningful contribution
 
-### "Unary head gets weak gradients through BP" — WRONG, but "7-10x amplification" is also WRONG → RESOLVED (Experiment 18)
+### "Unary head gets weak gradients through BP" — WRONG, but "7-10x amplification" is also WRONG → RESOLVED (Experiments 18/18b)
 - **Raw measurement**: BP chain gradient norms are 7-10x larger than direct path
 - **After scrutiny (12-agent review)**: the 7-10x is confounded by loss magnitude (BP loss=4.3 vs direct loss=1.8, expected ratio from loss alone = 12.1x)
 - **Corrected amplification (loss-normalized)**: 2.2x for unary net[0], 1.55x for unary net[-1], **9.0x for encoder.layer1** (genuine)
-- **RESOLVED — Cosine similarity measurement (Experiment 18)**: BP creates near-orthogonal gradient directions for shared params (cos=0.26 for unary net[0], cos=0.17 for encoder.layer1, on baselines of 0.91 and 0.29). Persists after training. BP also introduces 3 entirely new optimization dimensions (encoder.layer3 + pairwise params) that receive zero direct supervision signal. "Different optimization landscape" rather than "preconditioner" or "amplifier."
+- **RESOLVED — Cosine similarity measurement (Experiments 18/18b)**: BP creates gradient conflict with direct supervision. This is an instance of the well-known gradient conflict phenomenon from multi-task learning (Du et al. 2018, PCGrad Yu et al. 2020), applied for the first time to differentiable structured prediction layers. Key results: cos=-0.028 at 10% labels (anti-correlated), cos=0.690 at 50% labels, baseline=0.913. Dose-response across label fractions. 3 parameter groups are BP-only (zero direct gradient). The measurement technique is standard (MTL literature since 2018). The finding in the structured prediction context is novel.
 
 ### "Unconstrained K×K pairwise matrix" — FAILED
 - Diagonal ratio 0.094, Tree→Building: 0.789, BP destroyed 3 classes
@@ -1204,7 +1204,7 @@ Also measured:
 
 ### Key findings
 
-**1. BP changes gradient DIRECTION, and this persists after training.**
+**1. BP creates gradient conflict with direct supervision (instance of a known MTL phenomenon).**
 
 The cosine similarity between BP and direct gradients is well below the random baseline for all shared parameters. The data sweep (more reliable than single-batch) shows:
 - unary_1.net[0]: cos = 0.256 on a baseline of 0.913 — **near-orthogonal**
@@ -1212,6 +1212,12 @@ The cosine similarity between BP and direct gradients is well below the random b
 - unary_1.net[-1]: cos = 0.853 on a baseline of 1.000 — moderate redirection
 
 This is NOT a random init artifact. It persists at Stage 3 (trained model).
+
+**Novelty context (critical for paper framing):** Measuring cosine similarity between gradients from different computation paths is a STANDARD technique in multi-task learning, established by Du et al. 2018 and formalized by Yu et al. 2020 (PCGrad). Finding cos < 0 between auxiliary and primary gradients is well-documented. What is novel here is applying this analysis to differentiable structured prediction (BP) layers, where the gradient conflict arises from a single loss through two computation paths rather than from two separate loss functions. The paper MUST cite:
+- Du, Czarnecki et al. 2018: "Adapting Auxiliary Losses Using Gradient Similarity" (NeurIPS workshop) — closest match, measures cos(grad_aux, grad_primary) and zeros out auxiliary when negative
+- Yu et al. 2020: "Gradient Surgery for Multi-Task Learning" (PCGrad, NeurIPS) — defines "conflicting gradients" as cos < 0, introduces gradient projection
+- Liu et al. 2021: "Conflict-Averse Gradient Descent" (CAGrad, NeurIPS) — minimizes worst-case task loss under gradient conflict
+- Shamsian et al. 2023: "AuxiNash" (ICML) — formalizes auxiliary learning as asymmetric bargaining game
 
 **2. Three parameters are BP-ONLY (zero direct gradient).**
 
@@ -1233,10 +1239,6 @@ After factoring out the loss magnitude confound:
 
 The prior "7-10x" claim was ~50% loss confound for unary params, but real for encoder params.
 
-**4. Corrects the 12-agent scrutiny's reframing.**
-
-The scrutiny said "BP acts as an implicit gradient preconditioner." This is confirmed but understated. BP doesn't just "precondition" — it creates near-orthogonal gradient directions for feature extraction parameters and introduces entirely new optimization dimensions. "Different optimization landscape" is more accurate than "preconditioner."
-
 ### Connection to pairwise degeneracy
 
 This provides a necessary (not sufficient) condition for the degeneracy finding:
@@ -1251,6 +1253,181 @@ This provides a necessary (not sufficient) condition for the degeneracy finding:
 
 - **Loss confound eliminated**: both paths now use the same FocalLoss (prior `test_gradient_comparison.py` used FocalLoss vs cross_entropy)
 - **Double-softmax noted**: both unary_1() and dhbp() output log-softmax, but FocalLoss expects raw logits. Both paths have identical treatment, so the comparison is fair.
+
+---
+
+## Experiment 18b: Gradient Direction at 10% Labels — Dose-Response
+
+**Date**: 2026-03-31
+**Purpose**: Repeat cosine similarity measurement on the 10% labeled model (where pairwise degeneracy was most severe) and compare against 50% results from Experiment 18. If gradient redirection is stronger at 10%, this establishes a dose-response relationship between label fraction, gradient redirection, and degeneracy.
+
+**Script**: `test_gradient_cosine.py`
+**Model**: 10% labeled, entropy-weighted BP, 3 levels, 30 epochs (best=62.21% at epoch 25, final=49.06%)
+**Checkpoint**: `/kaggle/working/output_pct_10/best_segmentation.pth`
+
+### Results: Stage 3 (trained model) — 10% vs 50%
+
+| Parameter | 10% model | 50% model | Baseline | Interpretation |
+|---|---|---|---|---|
+| unary_1.net[0] | **-0.028** | 0.690 | 0.913 | 10%: ANTI-CORRELATED. 50%: moderate. |
+| unary_1.net[-1] | **0.574** | 0.885 | 1.000 | 10%: moderate redirection. 50%: mild. |
+| encoder.layer1 | **0.232** | 0.422 | 0.290 | 10%: below baseline. 50%: above baseline. |
+| encoder.layer3 | BP-ONLY | BP-ONLY | 0.208 | Both: zero direct gradient |
+| pairwise_12.alpha_net[0] | BP-ONLY | BP-ONLY | 0.425 | Both: zero direct gradient |
+| pairwise_12.residual_net[0] | BP-ONLY | BP-ONLY | 0.678 | Both: zero direct gradient |
+
+### Loss-normalized gradient norms (Stage 3, 10% model)
+
+| Parameter | BP norm/L | Direct norm/L | Normalized ratio |
+|---|---|---|---|
+| unary_1.net[0] | 0.2999 | 0.1256 | **2.39x** |
+| unary_1.net[-1] | 0.8656 | 0.3044 | **2.84x** |
+| encoder.layer1 | 0.0074 | 0.0033 | **2.25x** |
+| encoder.layer3 | 0.0027 | 0.0000 | inf (BP-only) |
+| pairwise_12.alpha_net[0] | 0.0085 | 0.0000 | inf (BP-only) |
+| pairwise_12.residual_net[0] | 0.0314 | 0.0000 | inf (BP-only) |
+
+### Key finding: Dose-response relationship
+
+Less labeled data → stronger gradient redirection by BP:
+
+```
+Gradient direction alignment (cosine similarity) vs label fraction:
+
+unary_1.net[0]:     10% = -0.028     50% = 0.690    (baseline = 0.913)
+                         │                  │
+                    ANTI-CORRELATED    MODERATE
+                    ◄──────────────────────────────────────────────►
+                    opposite            aligned           identical
+                   -1.0                  0.0                +1.0
+
+unary_1.net[-1]:    10% = 0.574      50% = 0.885    (baseline = 1.000)
+
+encoder.layer1:     10% = 0.232      50% = 0.422    (baseline = 0.290)
+```
+
+**The 10% model's first unary conv has cos = -0.028** — BP and direct supervision gradients point in slightly OPPOSITE directions. This is not just redirection, it's anti-correlation. The 50% model has cos = 0.690 for the same parameter — still redirected but meaningfully correlated.
+
+This pattern holds across all shared parameters: every cosine drops significantly from 50% to 10%.
+
+### Interpretation
+
+The dose-response connects three phenomena:
+
+1. **Less labeled data → less direct supervision signal** to anchor the optimization
+2. **Less anchoring → BP dominates the optimization landscape** (cos drops toward 0 or below)
+3. **BP-dominated landscape → pairwise has freedom to learn shortcuts** (class remapping)
+
+At 10% labels, the first unary conv is being trained in essentially opposite directions by BP vs direct supervision. The pairwise potentials — which receive ONLY BP gradient — are completely unsupervised by the direct signal. This is the exact condition under which the unconstrained pairwise learned Tree→Building remapping (Experiment 5).
+
+At 50% labels, the stronger direct supervision signal keeps the optimization more aligned (cos = 0.690 instead of -0.028), giving the pairwise less room to degenerate.
+
+### What this means for the paper narrative
+
+The three findings form a coherent story, but the gradient analysis must be framed correctly:
+
+```
+Finding 1: Pairwise degeneracy              (WHAT happens — GENUINELY NOVEL)
+  Unconstrained K×K matrices learn class remapping instead of
+  spatial consistency. Tree→Building: 0.789. Worst at 10% labels.
+  Nobody has documented this failure mode. The field uses Potts
+  for computational reasons, not because they characterized this.
+  Verified against 12+ papers (Zheng 2015, Chandra 2017,
+  Vemulapalli 2016, Lin 2016, Larsson 2018, Knobelreiter 2020).
+
+Finding 2: Gradient conflict through BP      (WHY — NOVEL APPLICATION of known technique)
+  BP creates gradient conflict with direct supervision. At 10%,
+  cos=-0.028 (anti-correlated). At 50%, cos=0.690. Dose-response.
+  The MEASUREMENT TECHNIQUE (cosine similarity between gradient
+  paths) is standard in MTL (Du et al. 2018, PCGrad 2020).
+  The FINDING (BP layers create gradient conflict with supervised
+  loss in structured prediction) has not been reported before.
+  Pairwise params receive ZERO direct supervision signal.
+
+Finding 3: Constrained pairwise prevents it  (HOW to fix it — modest novelty)
+  α·I + (1-α)·R constrains the pairwise potential space,
+  preventing the class remapping shortcut regardless of
+  how much BP dominates the gradient landscape.
+```
+
+### Novelty assessment (4-agent literature verification, 2026-03-31)
+
+Four independent research agents searched 60+ papers across structured prediction, MTL optimization, and CRF/MRF literature:
+
+**Finding 1 (pairwise degeneracy): GENUINELY NOVEL** (confidence 9/10)
+- Searched: Zheng 2015, Chandra 2017, Vemulapalli 2016, Lin 2016, Larsson 2018, Knobelreiter 2017/2020, E-CRF 2023, Arnab 2018 survey, DilatedCRF 2022, Shah & Shah 2021
+- Closest work: Larsson et al. 2018 (learn arbitrary pairwise potentials but never analyze for degeneracy), E-CRF 2023 (boundary class confusion, but in CNN classifier weights, not pairwise matrix)
+- Everybody uses Potts for computational reasons (tractable graph cuts, efficient mean-field), NOT because they documented the learned-potential failure mode
+
+**Finding 2 (gradient direction through BP): NOVEL APPLICATION, NOT NOVEL TECHNIQUE** (confidence 9/10)
+- Cosine similarity between task gradients is the standard diagnostic in MTL since Du et al. 2018 (DeepMind) and PCGrad (Yu et al. 2020)
+- cos < 0 between auxiliary and primary gradients is well-documented (Du 2018, Gradient Vaccine 2020, AuxiNash 2023)
+- Nobody has applied this to structured prediction layers (CRF/MRF/BP). The two literatures have never been connected
+- Searched: Domke 2012, Zheng 2015, Knobelreiter 2020, Belanger & McCallum 2016, Blondel 2022 — none measure gradient direction through structured prediction
+
+**Finding 3 (constrained pairwise): MODEST NOVELTY** (confidence 7/10)
+- Constrained potentials exist (Potts, Gaussian kernels in DenseCRF) but are motivated by computation, not degeneracy prevention
+- The specific α·I+(1-α)·R decomposition with learned spatially-varying α is a reasonable contribution
+
+### Critical literature to cite
+
+**Must cite (gradient conflict is a known MTL phenomenon):**
+- Du, Czarnecki et al. 2018: "Adapting Auxiliary Losses Using Gradient Similarity" https://arxiv.org/abs/1812.02224
+- Yu et al. 2020: "Gradient Surgery for Multi-Task Learning" (PCGrad) https://arxiv.org/abs/2001.06782
+- Liu et al. 2021: "Conflict-Averse Gradient Descent" (CAGrad) https://arxiv.org/abs/2110.14048
+- Shamsian et al. 2023: "AuxiNash" (auxiliary learning as asymmetric bargaining) https://arxiv.org/abs/2301.13501
+- Jiang et al. 2023: "ForkMerge" (negative transfer in auxiliary learning, NeurIPS) https://arxiv.org/abs/2301.12618
+
+**Must cite (pairwise potentials in CRF/MRF):**
+- Zheng et al. 2015: "CRF as RNN" (end-to-end CRF, learned compatibility transform) https://arxiv.org/abs/1502.03240
+- Larsson, Arnab et al. 2018: "Projected Gradient Descent for Arbitrary Pairwise Potentials" https://arxiv.org/abs/1701.06805
+- Knobelreiter & Pock 2020: "BP Reloaded: Learning BP-Layers" (CVPR) https://arxiv.org/abs/2003.06281
+- Krahenbuhl & Koltun 2011: "Dense CRF" (Gaussian pairwise kernels) https://arxiv.org/abs/1210.5644
+
+**Should cite (related phenomena):**
+- Wang et al. 2020: "Gradient Vaccine" (negative cosine → negative transfer in multilingual) https://arxiv.org/abs/2010.05874
+- Sener & Koltun 2018: "Multi-Task Learning as Multi-Objective Optimization" https://arxiv.org/abs/1810.04650
+- Guan et al. 2024: "Neural Markov Random Field for Stereo Matching" (CVPR 2024, learned MRF potentials) https://openaccess.thecvf.com/content/CVPR2024/html/Guan_Neural_Markov_Random_Field_for_Stereo_Matching_CVPR_2024_paper.html
+
+### Target venues (based on publication landscape analysis)
+
+**CRF/MRF for segmentation is declining at top CV venues** (0-2 papers/year at CVPR/ECCV/NeurIPS). But graphical model inference theory venues are active:
+
+**Tier 1 (strong fit):**
+- **SPIGM workshop @ NeurIPS 2025** — theme: "is probabilistic inference still relevant?" Almost tailor-made. Workshop paper, early feedback. https://spigmworkshopv3.github.io/
+- **UAI 2025/2026** — natural home for graphical model inference theory. ~100 papers/year.
+- **AISTATS** — accepts theoretical analysis of inference algorithms.
+- **PGM (Int'l Conf. Probabilistic Graphical Models)** — small dedicated venue, 32 papers in 2024, published in PMLR.
+
+**Tier 2 (good fit with right framing):**
+- **TMLR** — journal, no deadline pressure, rigorous review.
+- **NeurIPS main** — only if framed as "when/why structured prediction fails in modern systems." High bar.
+
+**Tier 3 (application framing needed):**
+- **MICCAI / Medical Image Analysis** — CRF still used in medical imaging, degeneracy analysis relevant.
+- **CVPR/ECCV** — only with strong application results on multiple datasets.
+
+### Limitations
+
+1. **Single run at each label fraction.** No error bars. The 12-agent scrutiny flagged this as critical. Need: 3 seeds minimum for both 10% and 50%.
+2. **Single dataset** (ISPRS Vaihingen). Need: Potsdam reproduction.
+3. **Correlation, not causation.** 10% has more redirection AND more degeneracy, but both could be downstream effects of limited data. Still needed: constrained-vs-unconstrained cosine comparison to establish the causal mechanism.
+4. **Data sweep uses random-init model.** The sweep section (5 random batches) ran on a fresh random-DHBP model, not the trained 10% model. The -0.028 stability across batches for the trained 10% model is not yet verified.
+5. **Gradient conflict framing is NOT novel.** Must position as application of known MTL technique to structured prediction, not as discovery of gradient conflict.
+
+### Path to publication
+
+**Workshop paper (SPIGM @ NeurIPS 2025, 4 pages, 55-70%)** — 2-3 weeks:
+- 3-seed reproduction for 10% and 50% cosine measurements
+- Fix sweep to use trained model weights
+- Cite MTL gradient conflict literature properly
+- Title: "Pairwise Potential Degeneracy in End-to-End Belief Propagation: Characterization and Gradient Conflict Analysis"
+
+**Full paper (UAI/AISTATS, 25-40% / TMLR 50-60%)** — 6-8 weeks:
+- Everything above, plus second dataset (Potsdam)
+- Constrained-vs-unconstrained cosine comparison (causal mechanism)
+- Apply degeneracy diagnostic to DenseCRF (generality)
+- Frame as contribution to understanding inference failures in pairwise graphical models, with segmentation as motivating application
 
 ---
 
