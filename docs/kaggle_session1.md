@@ -16,9 +16,11 @@ Copy each cell into a Kaggle notebook cell. Run sequentially.
 
 ---
 
-## Cell 2: Verify seed argument exists
+## Cell 2: Verify setup
 
 ```python
+import subprocess, os
+os.chdir("/kaggle/working/cvae-quadratreeMRF")
 !grep -n "seed" complete_training.py | head -5
 ```
 
@@ -38,7 +40,7 @@ for seed in [0, 1, 2]:
     print(f"  TRAINING: 10% labels, seed={seed}, WITH BP")
     print(f"{'='*60}\n")
 
-    subprocess.run([
+    result = subprocess.run([
         "python", "complete_training.py",
         "--contrastive_ckpt", CONTRASTIVE_CKPT,
         "--output_dir", f"/kaggle/working/output_pct10_seed{seed}",
@@ -46,9 +48,19 @@ for seed in [0, 1, 2]:
         "--epochs_seg", "30",
         "--seed", str(seed),
         "--data_dir", "./input",
-    ], check=True)
+    ])
 
-    print(f"\n  Seed {seed} complete. Checkpoint: /kaggle/working/output_pct10_seed{seed}/best_segmentation.pth")
+    if result.returncode != 0:
+        print(f"  WARNING: seed {seed} exited with code {result.returncode} (checkpoint may still be saved)")
+    else:
+        print(f"\n  Seed {seed} complete.")
+
+# Verify checkpoints exist
+import os
+for seed in [0, 1, 2]:
+    path = f"/kaggle/working/output_pct10_seed{seed}/best_segmentation.pth"
+    exists = "OK" if os.path.exists(path) else "MISSING"
+    print(f"  Seed {seed}: {exists}")
 ```
 
 ---
@@ -61,7 +73,7 @@ for seed in [0, 1, 2]:
     print(f"  TRAINING: 10% labels, seed={seed}, NO BP")
     print(f"{'='*60}\n")
 
-    subprocess.run([
+    result = subprocess.run([
         "python", "complete_training.py",
         "--contrastive_ckpt", CONTRASTIVE_CKPT,
         "--output_dir", f"/kaggle/working/output_pct10_nobp_seed{seed}",
@@ -70,9 +82,18 @@ for seed in [0, 1, 2]:
         "--seed", str(seed),
         "--no_bp",
         "--data_dir", "./input",
-    ], check=True)
+    ])
 
-    print(f"\n  Seed {seed} (no-BP) complete.")
+    if result.returncode != 0:
+        print(f"  WARNING: seed {seed} exited with code {result.returncode} (checkpoint may still be saved)")
+    else:
+        print(f"\n  Seed {seed} (no-BP) complete.")
+
+# Verify checkpoints exist
+for seed in [0, 1, 2]:
+    path = f"/kaggle/working/output_pct10_nobp_seed{seed}/best_segmentation.pth"
+    exists = "OK" if os.path.exists(path) else "MISSING"
+    print(f"  Seed {seed} (no-BP): {exists}")
 ```
 
 ---
@@ -85,11 +106,14 @@ for seed in [0, 1, 2]:
     print(f"  COSINE SIMILARITY: 10% labels, seed={seed}")
     print(f"{'='*60}\n")
 
-    subprocess.run([
+    result = subprocess.run([
         "python", "test_gradient_cosine.py",
         "--contrastive_ckpt", CONTRASTIVE_CKPT,
         "--seg_ckpt", f"/kaggle/working/output_pct10_seed{seed}/best_segmentation.pth",
-    ], check=True)
+    ])
+
+    if result.returncode != 0:
+        print(f"  WARNING: seed {seed} cosine exited with code {result.returncode}")
 ```
 
 ---
@@ -97,12 +121,18 @@ for seed in [0, 1, 2]:
 ## Cell 6: Pairwise diagnostics (all 3 BP checkpoints)
 
 ```python
-!python extract_pairwise_diagnostics.py \
-    --seg_ckpt /kaggle/working/output_pct10_seed0/best_segmentation.pth \
-               /kaggle/working/output_pct10_seed1/best_segmentation.pth \
-               /kaggle/working/output_pct10_seed2/best_segmentation.pth \
-    --data_dir ./input \
-    --output_dir /kaggle/working/paper_figures_10pct
+result = subprocess.run([
+    "python", "extract_pairwise_diagnostics.py",
+    "--seg_ckpt",
+    "/kaggle/working/output_pct10_seed0/best_segmentation.pth",
+    "/kaggle/working/output_pct10_seed1/best_segmentation.pth",
+    "/kaggle/working/output_pct10_seed2/best_segmentation.pth",
+    "--data_dir", "./input",
+    "--output_dir", "/kaggle/working/paper_figures_10pct",
+])
+
+if result.returncode != 0:
+    print(f"  WARNING: diagnostics exited with code {result.returncode}")
 ```
 
 ---
@@ -110,9 +140,14 @@ for seed in [0, 1, 2]:
 ## Cell 7: Generate figures (with whatever data is available)
 
 ```python
-!python plot_paper_figures.py \
-    --output_dir /kaggle/working/paper_figures \
-    --pairwise_json /kaggle/working/paper_figures_10pct/pairwise_diagnostics.json
+result = subprocess.run([
+    "python", "plot_paper_figures.py",
+    "--output_dir", "/kaggle/working/paper_figures",
+    "--pairwise_json", "/kaggle/working/paper_figures_10pct/pairwise_diagnostics.json",
+])
+
+if result.returncode != 0:
+    print(f"  WARNING: figures exited with code {result.returncode}")
 ```
 
 ---

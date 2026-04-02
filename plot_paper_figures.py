@@ -109,11 +109,14 @@ def fig1_pairwise_comparison(output_dir):
     unconstrained_matrix = None
 
     if PAIRWISE_JSON and os.path.exists(PAIRWISE_JSON):
-        with open(PAIRWISE_JSON) as f:
-            data = json.load(f)
-        # Use first entry as constrained
-        if data:
-            constrained_matrix = np.array(data[0]['avg_psi'])
+        try:
+            with open(PAIRWISE_JSON) as f:
+                data = json.load(f)
+            # Use first entry as constrained
+            if data:
+                constrained_matrix = np.array(data[0]['avg_psi'])
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"  Warning: could not load {PAIRWISE_JSON}: {e}. Using placeholder.")
 
     # Fallback: placeholder matrices
     if constrained_matrix is None:

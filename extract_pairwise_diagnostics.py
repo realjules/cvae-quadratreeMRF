@@ -243,13 +243,21 @@ def main():
             os.path.join(args.output_dir, f"pairwise_heatmap_{ckpt_name}.png"),
         )
 
-        # Store for multi-seed summary
-        all_diagnostics.append({
+        # Store for multi-seed summary (convert numpy types for JSON)
+        serializable = {
             'checkpoint': ckpt_path,
             'name': ckpt_name,
-            **{k: v for k, v in diag.items() if k != 'avg_psi'},
+            'diag_ratio': float(diag['diag_ratio']),
+            'max_off_diagonal': float(diag['max_off_diagonal']),
+            'max_off_pair': list(diag['max_off_pair']),
+            'per_class_diag': {k: float(v) for k, v in diag['per_class_diag'].items()},
+            'alpha_mean': float(diag['alpha_mean']),
+            'alpha_std': float(diag['alpha_std']),
+            'alpha_min': float(diag['alpha_min']),
+            'alpha_max': float(diag['alpha_max']),
             'avg_psi': diag['avg_psi'].tolist(),
-        })
+        }
+        all_diagnostics.append(serializable)
 
         del encoder, dhbp
         if torch.cuda.is_available():
