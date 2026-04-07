@@ -44,6 +44,54 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class DumbPoolingModule(nn.Module):
+    """Receptive-field-matched baseline: spatial context WITHOUT structured inference.
+
+    Matches the quadtree BP's ~103px effective receptive field using a simple
+    multi-scale pooling pyramid + concatenation + 1x1 conv. No message passing,
+    no pairwise potentials, no graphical model math.
+
+    Purpose: If this matches BP's accuracy, then BP's value is just receptive
+    field expansion, not structured probabilistic inference.
+
+    Architecture:
+        p1 [B, 64, 128, 128]  → unary logits  [B, K, 128, 128]
+        p2 [B, 128, 64, 64]   → pool + upsample to 128×128
+        p3 [B, 256, 32, 32]   → pool + upsample to 128×128
+        concat all → 1x1 conv → K classes
+    """
+
+    def __init__(self, n_classes: int = 6):
+        super().__init__()
+        self.n_classes = n_classes
+        # Fuse multi-scale features: 64 + 128 + 256 = 448 channels
+        self.fuse = nn.Sequential(
+            nn.Conv2d(64 + 128 + 256, 128, 1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, n_classes, 1),
+        )
+        print("DumbPooling: multi-scale pooling baseline (no BP, no pairwise)")
+
+    def forward(self, p1, p2, p3):
+        """
+        Args:
+            p1: [B, 64, 128, 128]
+            p2: [B, 128, 64, 64]
+            p3: [B, 256, 32, 32]
+
+        Returns:
+            [B, n_classes, 128, 128] log-softmax logits
+        """
+        H, W = p1.shape[2], p1.shape[3]
+        # Upsample coarser features to match p1 resolution
+        p2_up = F.interpolate(p2, size=(H, W), mode='bilinear', align_corners=False)
+        p3_up = F.interpolate(p3, size=(H, W), mode='bilinear', align_corners=False)
+        # Concatenate and classify
+        fused = torch.cat([p1, p2_up, p3_up], dim=1)  # [B, 448, 128, 128]
+        return F.log_softmax(self.fuse(fused), dim=1)
+
+
 class UnaryPotentialHead(nn.Module):
     """Maps encoder features to log-unary potentials over K classes.
 

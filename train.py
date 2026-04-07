@@ -19,7 +19,7 @@ import numpy as np
 from tqdm import tqdm
 
 from net.cvae import ContrastiveEncoder
-from net.dhbp import DHBPModule
+from net.dhbp import DHBPModule, DumbPoolingModule
 from net.loss import SegmentationLoss
 
 
@@ -43,18 +43,24 @@ class SegmentationTrainer:
         simple_unary: bool = False,
         diagonal_pairwise: bool = False,
         n_levels: int = 3,
+        dumb_pooling: bool = False,
     ):
         self.device = device
         self.n_classes = n_classes
         self.use_bp = use_bp
+        self.dumb_pooling = dumb_pooling
         self.encoder = encoder.to(device)
-        self.dhbp = DHBPModule(
-            n_classes=n_classes, simple_unary=simple_unary,
-            diagonal_pairwise=diagonal_pairwise, n_levels=n_levels,
-        ).to(device)
+
+        if dumb_pooling:
+            self.dhbp = DumbPoolingModule(n_classes=n_classes).to(device)
+        else:
+            self.dhbp = DHBPModule(
+                n_classes=n_classes, simple_unary=simple_unary,
+                diagonal_pairwise=diagonal_pairwise, n_levels=n_levels,
+            ).to(device)
         self.criterion = SegmentationLoss(n_classes=n_classes).to(device)
 
-        if not use_bp:
+        if not use_bp and not dumb_pooling:
             # No-BP ablation: encoder → unary head only (no message passing)
             # Reuse unary_1 from DHBP so it's the same architecture
             print("NOTE: BP disabled — using unary head only (ablation mode)")
@@ -92,7 +98,10 @@ class SegmentationTrainer:
         # Extract multi-scale features (encoder IS fine-tuned)
         p1, p2, p3 = self.encoder.encode(images)
 
-        if self.use_bp:
+        if self.dumb_pooling:
+            # Dumb pooling baseline: multi-scale concat, no BP
+            logits = self.dhbp(p1, p2, p3)  # [B, n_classes, 128, 128]
+        elif self.use_bp:
             # Full DHBP: unary + pairwise + belief propagation
             logits = self.dhbp(p1, p2, p3)  # [B, n_classes, 128, 128]
         else:
@@ -134,7 +143,9 @@ class SegmentationTrainer:
         images = images.to(self.device)
         p1, p2, p3 = self.encoder.encode(images)
 
-        if self.use_bp:
+        if self.dumb_pooling:
+            logits = self.dhbp(p1, p2, p3)
+        elif self.use_bp:
             logits = self.dhbp(p1, p2, p3)
         else:
             logits = F.log_softmax(self.dhbp.unary_1(p1), dim=1)

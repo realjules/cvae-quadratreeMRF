@@ -1,47 +1,49 @@
-# Paper Plan: Pairwise Potential Degeneracy in End-to-End Belief Propagation
+# Paper Plan: Pairwise Potential Degeneracy in End-to-End Trained Graphical Models
 
 **Target**: SPIGM workshop @ NeurIPS 2025 (4 pages + appendix, deadline TBD ~Aug/Sep 2025)
 **Backup**: UAI 2026 or AISTATS 2026 (full 8-page paper)
-**Working title**: "Pairwise Potential Degeneracy in End-to-End Trained Graphical Models: Characterization, Gradient Mechanism, and Constrained Fix"
+**Working title**: "Pairwise Potential Degeneracy in End-to-End Trained Graphical Models"
+
+**Last updated**: 2026-04-07 (post adversarial review — 4 structural vulnerabilities addressed)
 
 ---
 
 ## 1. Paper Structure (4 pages + appendix)
 
 ### Abstract (~150 words)
-End-to-end training of structured prediction layers (CRF/MRF with belief propagation) is attractive but fragile. We characterize a failure mode where unconstrained learned K×K pairwise potential matrices converge to class remapping instead of spatial consistency. On aerial image segmentation (ISPRS), the learned pairwise matrix exhibits Tree→Building remapping strength of 0.789 with diagonal ratio 0.094, destroying minority class predictions (Cars: 60.4% → 32.2%). We show this degeneracy arises because BP creates gradient conflict with direct supervision (cos=-0.028 at 10% labels), an instance of the gradient interference phenomenon known in multi-task learning. Less labeled data intensifies the conflict, giving pairwise potentials more freedom to learn shortcuts. A constrained decomposition ψ = α·I + (1-α)·R prevents degeneracy while preserving BP's benefits. Our findings explain why most CRF methods use Potts potentials and provide the first characterization of this failure mode in learned pairwise potentials.
+End-to-end training of structured prediction layers enables learning pairwise potentials directly from data, but we identify and characterize a previously undocumented failure mode: unconstrained learned K×K pairwise matrices converge to class remapping instead of spatial consistency. On aerial image segmentation (ISPRS Vaihingen, 3 seeds), the unconstrained pairwise matrix exhibits Tree→Building remapping of 0.729 with diagonal ratio 0.196, destroying minority classes (Cars accuracy halved). We show this is distinct from a receptive field effect by comparing against a spatial-context baseline matching the same effective field of view. Analysis of the gradient landscape reveals that end-to-end training naturally produces gradient divergence between the message-passing and direct supervision paths — an expected consequence of inference offloading, not a pathology. A constrained decomposition ψ = α·I + (1-α)·R prevents degeneracy (diagonal ratio 0.784) while preserving the +4.65pp accuracy benefit of structured prediction. Our findings explain why Potts potentials remain dominant and provide practical guidance for learning pairwise potentials safely.
 
 ### Section 1: Introduction (~0.75 page)
 - End-to-end CRF/MRF training: promise and fragility
 - "Everyone uses Potts, nobody says why learned potentials fail"
-- Our contribution: characterize the failure, explain the mechanism, fix it
+- Our contribution: characterize the failure mode, distinguish it from receptive field effects, provide a constrained fix
 
 ### Section 2: Background (~0.5 page)
 - Pairwise MRF/CRF for segmentation
-- Differentiable BP on quadtrees
-- Gradient conflict in multi-task learning (Du et al. 2018, PCGrad)
+- Message passing on quadtrees (note: our entropy-gated variant is approximate, not exact BP — see Section 5 discussion)
+- Related work: Larsson et al. 2018 (arbitrary pairwise, no degeneracy analysis), E-CRF 2023 (boundary confusion, different mechanism)
 
 ### Section 3: Pairwise Degeneracy Characterization (~1 page)
 - Unconstrained K×K matrix analysis: diagonal ratio, off-diagonal structure
-- Class remapping visualization (heatmap)
+- Class remapping visualization (Figure 1 heatmap — constrained vs unconstrained)
 - Effect on per-class accuracy (Cars destruction)
 - Comparison: constrained α·I+(1-α)·R prevents it
+- 3-seed reproduction with error bars
 
-### Section 4: Gradient Conflict Analysis (~1 page)
-- Method: cosine similarity, same FocalLoss both paths, random baseline
-- Results: dose-response (10% vs 50% labels)
-- BP-only parameters (encoder.layer3, pairwise heads)
-- Connection to MTL gradient conflict literature
+### Section 4: Is It Just Receptive Field? (~0.75 page)
+- Dumb pooling baseline matching ~103px receptive field
+- If BP > dumb pooling: structured inference provides value beyond spatial context
+- If BP ≈ dumb pooling: BP's value is receptive field, but degeneracy finding still holds
+- Gradient landscape characterization: divergence between BP and direct paths is expected (inference offloading), not pathological. Cite MTL gradient conflict literature as related framing (Du et al. 2018, PCGrad).
 
-### Section 5: Experiments (~0.5 page)
-- Dataset: ISPRS Vaihingen (and Potsdam if ready)
-- 3-seed results with error bars
-- Key tables and figures (see Section 4 below)
+### Section 5: Discussion (~0.5 page)
+- Entropy-gated message passing: acknowledge departure from exact inference. Our modification weights children by confidence, breaking the sum-product derivation. Practical benefit (+4.65pp) but not exact marginals.
+- Pairwise degeneracy likely generalizes to any end-to-end trained structured prediction with unconstrained potentials (DenseCRF, Neural MRF)
+- Causal direction is ambiguous: degeneracy may cause gradient warping OR gradient freedom may enable degeneracy. We present descriptive characterization, not causal claim.
 
 ### Section 6: Conclusion (~0.25 page)
-- Pairwise degeneracy is a real, uncharacterized failure mode
-- Explains why Potts dominates (structural prevention, not deliberate)
-- Constrained potentials are the fix
+- First characterization of pairwise potential degeneracy in end-to-end trained graphical models
+- Constrained decomposition is the practical fix
 - Implications for Neural MRF (Guan et al. CVPR 2024) and future learned potentials
 
 ---
@@ -407,17 +409,20 @@ Same format as Experiment 18 Table 3, but with 3-seed mean ± std.
 
 ---
 
-## 5. Experiment Priority and Timeline
+## 5. Experiment Priority and Timeline (updated 2026-04-07)
 
 ```
-PRIORITY   EXPERIMENT                        TIME        BLOCKS
-────────   ──────────────────────────────    ────────    ──────────
-P0         A: 3-seed reproduction (10%+50%)  ~13h        Everything
-P0         B: Pairwise diagnostics per seed  ~30min      Figure 1
-P1         C: Constrained vs unconstrained   ~5h         Table 1, causal claim
-P1         E: Fix data sweep in script       ~10min      Table 2 quality
-P2         F: Convergence speedup + no-BP    ~6h         Supporting sentence + appendix fig
-P2         D: Potsdam dataset                ~2 days     Full paper only
+PRIORITY   EXPERIMENT                              TIME     STATUS
+────────   ──────────────────────────────────────   ──────   ──────
+DONE       A: 3-seed reproduction (10%)             ~12h    COMPLETE (Session 1)
+DONE       B: Pairwise diagnostics per seed (10%)   ~30min  COMPLETE (Session 1)
+DONE       F: No-BP baseline (10%, 3 seeds)         ~6h     COMPLETE (Session 1)
+P0 NEW     G: Dumb pooling baseline (receptive field) ~2h   NEEDED — blocks paper
+P0         A: 3-seed reproduction (50%)             ~6h     PENDING (Session 2)
+P1         H: Unconstrained pairwise training       ~2h     NEEDED for Figure 1a real data
+DROPPED    C: Constrained vs unconstrained cosine   —       DROPPED (reverse causality, Vuln #4)
+P1         E: Fix data sweep in script              ~10min  PENDING
+P2         D: Potsdam dataset                       ~2 days Full paper only
 ```
 
 ### Kaggle execution plan (2 sessions)
@@ -488,46 +493,56 @@ python test_gradient_cosine.py \
 
 ---
 
-## 7. Paper Writing Checklist
+## 7. Paper Writing Checklist (updated 2026-04-07)
 
-- [ ] Experiments A complete (3-seed, 10% + 50%)
-- [ ] Experiments B complete (pairwise diagnostics per seed)
-- [ ] Experiment C complete (constrained vs unconstrained cosine)
-- [ ] Experiment E complete (fix data sweep)
-- [ ] Figure 1: Pairwise heatmaps (unconstrained vs constrained)
-- [ ] Figure 2: Per-class accuracy bar chart
-- [ ] Figure 3: Cosine similarity dose-response plot
-- [ ] Figure 4: BP-only parameter diagram (appendix)
-- [ ] Table 1: Main results with error bars
-- [ ] Table 2: Cosine similarity full breakdown
-- [ ] Table 3: Loss-normalized gradient norms (appendix)
-- [ ] All 18 citations formatted
-- [ ] Abstract written
-- [ ] Introduction drafted
-- [ ] Background section with MTL gradient conflict framing
-- [ ] Related work distinguishes from Larsson 2018, E-CRF 2023
-- [ ] Conclusion connects to Neural MRF (Guan CVPR 2024)
+**Experiments:**
+- [x] Experiment A: 3-seed, 10% with BP — COMPLETE
+- [x] Experiment B: Pairwise diagnostics per seed (10%) — COMPLETE
+- [x] Experiment F: 3-seed, 10% no-BP baseline — COMPLETE
+- [ ] Experiment G: Dumb pooling baseline (receptive field match) — P0, BLOCKS PAPER
+- [ ] Experiment A: 3-seed, 50% with BP — PENDING
+- [ ] Experiment H: Unconstrained pairwise training (real data for Figure 1a)
+
+**Figures:**
+- [x] Figure 1: Pairwise heatmaps (constrained from real data, unconstrained needs Exp H)
+- [ ] Figure 2: Per-class accuracy bar chart (BP vs no-BP vs dumb pooling)
+- [ ] Figure 3: Cosine similarity (descriptive, not causal)
+- [x] Figure 4: BP-only parameter diagram (appendix)
+
+**Writing:**
+- [ ] Abstract rewritten (removed causal gradient claim, added receptive field baseline)
+- [ ] Acknowledge entropy-weighted BP is NOT exact inference
+- [ ] Gradient analysis reframed as descriptive (inference offloading), not causal
+- [ ] Receptive field baseline results integrated
+- [ ] Causal direction acknowledged as ambiguous
+- [ ] All 18+ citations formatted
 - [ ] Submitted to SPIGM workshop
 
 ---
 
-## 8. Key Arguments to Make (and Pitfalls to Avoid)
+## 8. Key Arguments to Make (and Pitfalls to Avoid) — updated 2026-04-07
 
 ### DO say:
 - "We characterize a previously undocumented failure mode of learned pairwise potentials"
-- "We apply gradient conflict analysis (Du et al. 2018, Yu et al. 2020) to differentiable structured prediction for the first time"
-- "The gradient conflict exhibits a dose-response with label fraction"
+- "Gradient divergence between BP and direct supervision is EXPECTED in end-to-end structured prediction (inference offloading), but unconstrained potentials exploit this freedom"
+- "Our entropy-gated message passing is approximate, not exact BP — we acknowledge this"
+- "We compare against a receptive-field-matched baseline to isolate the structured prediction contribution"
 - "This explains why Potts potentials remain dominant despite decades of work on learned potentials"
 
 ### DO NOT say:
+- "Gradient conflict CAUSES pairwise degeneracy" (causal direction is ambiguous)
+- "Exact sum-product belief propagation" (entropy weighting breaks exactness)
 - "We discovered that gradient directions can conflict" (PCGrad 2020 did)
-- "7-10x gradient amplification" (confounded by loss magnitude, debunked)
-- "BP acts as a preconditioner" (too vague, oversells)
-- "Novel gradient analysis technique" (it's standard MTL methodology)
+- "7-10x gradient amplification" (confounded, debunked)
+- "BP acts as a preconditioner" (too vague, wrong framing)
+- "Novel gradient analysis technique" (standard MTL methodology)
 
 ### Anticipated reviewer objections and responses:
 1. **"Just use Potts / DenseCRF"** → "That's our point. Everyone does, but nobody said WHY learned potentials fail. We provide the first characterization."
 2. **"CRF is dead, who cares"** → "Neural MRF (Guan CVPR 2024) and learned message passing are active. This failure mode applies to any learned pairwise potential."
 3. **"Single dataset"** → Valid for workshop paper. Potsdam for full paper.
-4. **"Gradient conflict is known in MTL"** → "Yes. We cite PCGrad. Our contribution is showing it occurs in structured prediction layers and causes a specific failure mode (degeneracy)."
+4. **"Gradient conflict is known in MTL"** → "Yes. We cite PCGrad. Our contribution is not the measurement technique but the finding that structured prediction layers create gradient divergence as a natural consequence of inference offloading, and that unconstrained pairwise potentials exploit this."
 5. **"No theory, just empirics"** → Fair. Theoretical analysis of when degeneracy occurs (conditions on K, graph structure, label fraction) is future work.
+6. **"This isn't exact BP"** → "Correct. Our entropy-gated message passing is approximate. We acknowledge this and note the degeneracy occurs regardless of the weighting scheme."
+7. **"BP improvement is just receptive field"** → "We compare against a dumb pooling baseline matching the same ~103px receptive field. [Result: BP beats/matches dumb pooling by X pp]."
+8. **"Causal direction is unclear"** → "Agreed. We present descriptive characterization. Whether degeneracy causes gradient warping or gradient freedom enables degeneracy is an open question."

@@ -344,6 +344,8 @@ def main():
                         help='Ablation: use single Conv1x1 instead of 2-layer unary head')
     parser.add_argument('--diagonal_pairwise', action='store_true',
                         help='Ablation: hard diagonal pairwise (no class mixing)')
+    parser.add_argument('--dumb_pooling', action='store_true',
+                        help='Ablation: replace DHBP with multi-scale pooling (receptive field baseline)')
     parser.add_argument('--n_levels', type=int, default=3,
                         help='Number of quadtree levels (2, 3, or 4)')
     parser.add_argument('--wandb_project', default=None,
@@ -387,6 +389,7 @@ def main():
                 "diagonal_pairwise": args.diagonal_pairwise,
                 "contrastive_ckpt": args.contrastive_ckpt,
                 "seed": args.seed,
+                "dumb_pooling": args.dumb_pooling,
             },
         )
         print(f"Wandb logging enabled: {args.wandb_project}")
@@ -451,7 +454,10 @@ def main():
 
     # Stage 2: Segmentation
     use_bp = not args.no_bp
-    if not use_bp:
+    if args.dumb_pooling:
+        use_bp = False
+        print("\n*** ABLATION MODE: Dumb pooling baseline (receptive field match, no BP) ***\n")
+    elif not use_bp:
         print("\n*** ABLATION MODE: BP disabled — unary head only ***\n")
     seg_trainer = SegmentationTrainer(
         encoder=encoder,
@@ -462,6 +468,7 @@ def main():
         simple_unary=args.simple_unary,
         diagonal_pairwise=args.diagonal_pairwise,
         n_levels=args.n_levels,
+        dumb_pooling=args.dumb_pooling,
     )
 
     if args.epochs_seg > 0:
