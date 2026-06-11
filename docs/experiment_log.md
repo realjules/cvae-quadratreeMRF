@@ -439,6 +439,11 @@ Random seed variation (5 seeds):
 
 This is a property of the BP computation graph — the multi-path structure (4 children per parent, bottom-up + top-down passes) creates multiple gradient paths that sum together, amplifying the total gradient signal ~7-10x compared to direct supervision.
 
+> **⚠ CORRECTION (2026-06-11):** this finding was later INVALIDATED — the raw 7-10x ratio is confounded
+> by loss magnitude (expected ratio from the loss difference alone: 12.1x; see "CRITICAL SCRUTINY" and
+> Experiment 18). Loss-normalized values: ~1.4-2.4x for unary params, ~2-12x for encoder.layer1
+> (unstable across checkpoints, near-zero denominator). Do not cite the raw numbers from this experiment.
+
 ### Limitations
 
 - Measured on ONE type of structured prediction module (quadtree BP, 3 levels)
@@ -655,6 +660,11 @@ Cars:          21.4%  →  27.4%     +6.0%
 
 **BP improves ALL 5 classes. No class is hurt.** This is the first time across all experiments. Previously BP always stole from 3-4 classes to boost 1-2. The entropy weighting fixed this.
 
+> **⚠ CORRECTION (2026-06-11):** single-run diagnostic, since CONTRADICTED by the 3-seed reproduction —
+> Experiment 19 shows Trees **−6.75pp** under BP. The honest claim is "BP redistributes accuracy toward
+> minority classes", not "no class hurt". Per-class claims must come exclusively from the Experiment 19
+> 3-seed table.
+
 ### 50-Epoch Diagnostic: BP Still Changes Interior
 
 - BP changes 42.2% of pixels (down from 69.7% with hard diagonal, similar to 40% with old α·I+(1-α)·R)
@@ -775,7 +785,15 @@ The next meaningful improvement requires either:
 ## Future Research Direction: Hierarchical Gradient Amplification as a General Training Technique
 
 **Date identified**: 2026-03-26
-**Status**: Idea stage — pending validation experiments
+**Status**: RETIRED AS FRAMED (2026-06-11) — the quantitative premise was invalidated; see banner
+
+> **⚠ SECTION SUPERSEDED (2026-06-11):** Every "7-10x" number in this section was INVALIDATED by the
+> 12-agent math review (loss-magnitude confound — see "CRITICAL SCRUTINY" below and Experiment 18), and
+> the "remove at inference" hypothesis was separately disproven. The section is preserved as a record of
+> the idea's evolution. Do NOT quote any number from this section in a draft. The surviving facts live
+> in Experiment 19 (3-seed cosines: unary_1.net[0] = +0.302 ± 0.19 vs baseline 0.913) and the
+> loss-normalized norm tables of Experiments 18/18b/19 (~1.4-2.4x unary; ~2-12x encoder.layer1,
+> unstable across checkpoints).
 
 ### Core insight
 
@@ -785,13 +803,18 @@ BP adds zero parameters but amplifies gradients 7-10x through multi-path computa
 - **Remove** it at inference (zero cost, like dropout)
 - **Result**: model converges in 5-10 epochs instead of 30-50, saving 3-5x total compute
 
-### Evidence from our experiments
+### Evidence from our experiments (corrected 2026-06-11)
 
 ```
-Gradient amplification:  7-10x verified (3 stages, 5 seeds, 3 depths)
-Convergence speedup:     10 epochs with BP (60.5%) ≈ 30+ epochs without BP (59.9%)
-Depth scaling:           amplification doubles per level (7.4x → 16.6x → 22.6x)
-Entropy weighting:       content-dependent amplification (confident pixels ≠ uncertain)
+Gradient amplification:  INVALIDATED — raw 7-10x was a loss-magnitude confound (expected 12.1x
+                         from the loss difference alone). Loss-normalized residual: ~1.4-2.4x
+                         unary, ~2-12x encoder.layer1 (unstable). Also optimization-irrelevant
+                         under AdamW + grad clipping (scale invariance).
+Convergence speedup:     10 epochs with BP (60.5%) ≈ 30+ epochs without BP (59.9%) — single runs
+Depth scaling:           INVALIDATED — measured pre-correction, never re-measured loss-normalized;
+                         review notes it may vanish (better fit D^1.5 at best)
+Entropy weighting:       content-dependent gating mechanism stands, but "helps all classes" was
+                         CONTRADICTED by Exp 19 3-seed (Trees −6.75pp)
 ```
 
 ### CRITICAL UPDATE: "Remove at inference" hypothesis FAILED
@@ -806,7 +829,11 @@ No-BP-trained model:                                62.04%
 
 **This means:** BP is an inference-time tool (adds +4% when used), NOT a training-time tool (can't be removed). The "remove at inference" use case is invalidated. The idea of BP as a general training technique like Dropout needs to be reconsidered — the current evidence shows BP creates a dependency, not a temporary scaffold.
 
-**However:** The gradient amplification IS real (7-10x verified). The question is whether a different formulation (e.g., the simplified gradient amplification module that doesn't create unary dependency) could achieve the training-time benefit without the inference-time dependency. This remains open.
+**However:** ~~The gradient amplification IS real (7-10x verified)~~ **[CORRECTED 2026-06-11: the raw
+7-10x was a loss-magnitude confound; only a modest, checkpoint-unstable loss-normalized asymmetry
+survives (~1.4-2.4x unary, ~2-12x encoder.layer1)].** The question of whether a different formulation
+could achieve a training-time benefit without the inference-time dependency remains open, but its
+quantitative motivation is far weaker than this section originally assumed.
 
 ### What makes this different from existing techniques
 
@@ -832,11 +859,12 @@ This technique:     adds COMPUTATION PATHS → amplifies gradients (7-10x),
 ### Status of claims
 
 ```
-PROVEN:
-  ✓ Gradient amplification is real (7-10x, verified across 3 stages, 5 seeds)
-  ✓ Scales with depth (7.4x → 16.6x → 22.6x, ~2x per level)
-  ✓ BP helps convergence speed (60.5% at 10ep vs 54.9% without)
-  ✓ Entropy-weighted BP helps all classes (+4% overall, no class hurt)
+ORIGINALLY LISTED AS PROVEN — STATUS AS OF 2026-06-11:
+  ✗ Gradient amplification 7-10x — INVALIDATED (loss-magnitude confound; 12-agent review)
+  ✗ Depth scaling ~2x per level — INVALIDATED (pre-correction measurement; may vanish normalized)
+  ~ BP helps convergence speed — single-run evidence only; 3-seed curves exist (Exp 19/F) but
+    the speedup comparison was never re-run with error bars
+  ✗ Entropy-weighted BP helps all classes — CONTRADICTED by Exp 19 3-seed (Trees −6.75pp)
 
 DISPROVEN:
   ✗ "Train with BP, remove at inference" — unary becomes lazy
@@ -865,7 +893,7 @@ The "remove at inference" hypothesis failed because BP takes OVER the prediction
 
 | Requirement | Status |
 |---|---|
-| Gradient amplification measured | ✓ Done (7-10x, verified) |
+| Gradient amplification measured | ✗ Raw 7-10x INVALIDATED (loss confound); only unstable loss-normalized residual remains |
 | Convergence speedup shown | ✓ Partial (1 task) |
 | "Remove at inference" proof | ✗ FAILED — dependency created |
 | Fix dependency (aux loss / gradual / detached) | ? Open — needs experiments |
@@ -905,7 +933,7 @@ Revised option B: *"Decoupled Gradient Amplification: Multi-Path Training Withou
 - **Raw measurement**: BP chain gradient norms are 7-10x larger than direct path
 - **After scrutiny (12-agent review)**: the 7-10x is confounded by loss magnitude (BP loss=4.3 vs direct loss=1.8, expected ratio from loss alone = 12.1x)
 - **Corrected amplification (loss-normalized)**: 2.2x for unary net[0], 1.55x for unary net[-1], **9.0x for encoder.layer1** (genuine)
-- **RESOLVED — Cosine similarity measurement (Experiments 18/18b)**: BP creates gradient conflict with direct supervision. This is an instance of the well-known gradient conflict phenomenon from multi-task learning (Du et al. 2018, PCGrad Yu et al. 2020), applied for the first time to differentiable structured prediction layers. Key results: cos=-0.028 at 10% labels (anti-correlated), cos=0.690 at 50% labels, baseline=0.913. Dose-response across label fractions. 3 parameter groups are BP-only (zero direct gradient). The measurement technique is standard (MTL literature since 2018). The finding in the structured prediction context is novel.
+- **RESOLVED — Cosine similarity measurement (Experiments 18/18b/19, corrected 2026-06-11)**: BP redirects gradients relative to direct supervision. This is an instance of the well-known gradient conflict phenomenon from multi-task learning (Du et al. 2018, PCGrad Yu et al. 2020) applied to differentiable structured prediction layers. Key 3-seed results (Exp 19): cos = **+0.302 ± 0.19** at 10% labels vs baseline 0.913 — large redirection, NOT anti-correlation. The single-run cos=-0.028 from Exp 18b did NOT reproduce and is RETIRED. cos=0.690 at 50% labels remains single-run (seeds pending); two dose levels are a directional trend, not a dose-response. 3 parameter groups are BP-only (zero direct gradient) — an architectural consequence of the direct path reading only p1, present it as design observation. The measurement technique is standard (MTL literature since 2018); the structured-prediction application is novel, BUT per the June 2026 literature check, SGA (Li et al., ECCV 2022) already measured directional path-gradient conflict of a single loss (skip vs attention paths) — "first to measure path conflict" is NOT claimable; cite SGA and stake the delta on the controlled 2x2 protocol, supervision dependence, and the structured-inference setting.
 
 ### "Unconstrained K×K pairwise matrix" — FAILED
 - Diagonal ratio 0.094, Tree→Building: 0.789, BP destroyed 3 classes
@@ -1258,6 +1286,14 @@ This provides a necessary (not sufficient) condition for the degeneracy finding:
 
 ## Experiment 18b: Gradient Direction at 10% Labels — Dose-Response
 
+> **⚠ CORRECTION (2026-06-11):** the headline cos = −0.028 below did NOT reproduce. The purpose-built
+> 3-seed measurement (Experiment 19) gives **+0.302 ± 0.19** for the same parameter (min seed +0.175).
+> Retire "anti-correlated" from all drafts and talks. The 10%-vs-50% ordering survives only as a
+> directional trend: the 50% arm is one checkpoint measured on one batch (the 5-batch sweep accidentally
+> ran on a random-init model — see Limitations), and two dose levels do not establish a dose-response.
+> All numbers in Exps 18/18b/19 were also measured at Gaussian-noise inputs with random labels in
+> train-mode BatchNorm — re-measure on real Vaihingen batches before any submission.
+
 **Date**: 2026-03-31
 **Purpose**: Repeat cosine similarity measurement on the 10% labeled model (where pairwise degeneracy was most severe) and compare against 50% results from Experiment 18. If gradient redirection is stronger at 10%, this establishes a dose-response relationship between label fraction, gradient redirection, and degeneracy.
 
@@ -1335,14 +1371,18 @@ Finding 1: Pairwise degeneracy              (WHAT happens — GENUINELY NOVEL)
   Verified against 12+ papers (Zheng 2015, Chandra 2017,
   Vemulapalli 2016, Lin 2016, Larsson 2018, Knobelreiter 2020).
 
-Finding 2: Gradient conflict through BP      (WHY — NOVEL APPLICATION of known technique)
-  BP creates gradient conflict with direct supervision. At 10%,
-  cos=-0.028 (anti-correlated). At 50%, cos=0.690. Dose-response.
-  The MEASUREMENT TECHNIQUE (cosine similarity between gradient
-  paths) is standard in MTL (Du et al. 2018, PCGrad 2020).
-  The FINDING (BP layers create gradient conflict with supervised
-  loss in structured prediction) has not been reported before.
-  Pairwise params receive ZERO direct supervision signal.
+Finding 2: Gradient redirection through BP   (WHY — NOVEL APPLICATION of known technique)
+  [corrected 2026-06-11] BP redirects gradients relative to direct
+  supervision. At 10%, cos=+0.302±0.19 (3 seeds, Exp 19; the
+  single-run -0.028 did not reproduce and is retired). At 50%,
+  cos=0.690 (single run, seeds pending). Directional trend only —
+  not yet a dose-response. The MEASUREMENT TECHNIQUE (cosine
+  similarity between gradient paths) is standard in MTL (Du et al.
+  2018, PCGrad 2020), and SGA (Li et al., ECCV 2022) already
+  measured single-loss path conflict in attention — cite it; the
+  surviving delta is the structured-inference setting + controls.
+  Pairwise params receive ZERO direct supervision signal (by
+  construction: the direct path reads only p1).
 
 Finding 3: Constrained pairwise prevents it  (HOW to fix it — modest novelty)
   α·I + (1-α)·R constrains the pairwise potential space,

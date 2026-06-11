@@ -11,7 +11,9 @@
 ## 1. Paper Structure (4 pages + appendix)
 
 ### Abstract (~150 words)
-End-to-end training of structured prediction layers enables learning pairwise potentials directly from data, but we identify and characterize a previously undocumented failure mode: unconstrained learned K×K pairwise matrices converge to class remapping instead of spatial consistency. On aerial image segmentation (ISPRS Vaihingen, 3 seeds), the unconstrained pairwise matrix exhibits Tree→Building remapping of 0.729 with diagonal ratio 0.196, destroying minority classes (Cars accuracy halved). We show this is distinct from a receptive field effect by comparing against a spatial-context baseline matching the same effective field of view. Analysis of the gradient landscape reveals that end-to-end training naturally produces gradient divergence between the message-passing and direct supervision paths — an expected consequence of inference offloading, not a pathology. A constrained decomposition ψ = α·I + (1-α)·R prevents degeneracy (diagonal ratio 0.784) while preserving the +4.65pp accuracy benefit of structured prediction. Our findings explain why Potts potentials remain dominant and provide practical guidance for learning pairwise potentials safely.
+End-to-end training of structured prediction layers enables learning pairwise potentials directly from data, but we identify and characterize a previously undocumented failure mode: unconstrained learned K×K pairwise matrices converge to class remapping instead of spatial consistency. On aerial image segmentation (ISPRS Vaihingen), the unconstrained pairwise matrix exhibits Tree→Building remapping of [0.789 — single run, 2026-03-24; replace with 3-seed mean ± std after Experiment H] with diagonal ratio [0.094 — single run; 3-seed TBD after Experiment H], destroying minority classes ([Cars accuracy halved — single run; re-verify across seeds in Experiment H]). [TBD after Experiment G (dumb-pooling baseline, NOT YET RUN): whether this effect is distinct from receptive-field expansion, by comparing against a spatial-context baseline matching the same effective field of view — do not claim until the result exists.] Analysis of the gradient landscape reveals that end-to-end training naturally produces gradient divergence between the message-passing and direct supervision paths — an expected consequence of inference offloading, not a pathology. A constrained decomposition ψ = α·I + (1-α)·R prevents degeneracy (diagonal ratio 0.784 ± 0.003, 3 seeds, eval/all_results/paper_figures_10pct/pairwise_diagnostics.json) while preserving the +4.65 ± 1.1pp accuracy benefit of the message-passing module over the no-BP baseline (3 seeds, Experiment 19; attribution to *structured inference* specifically is pending Experiment G). Our findings explain why Potts potentials remain dominant and provide practical guidance for learning pairwise potentials safely.
+
+> **⚠ NUMBERS POLICY (added 2026-06-11):** The previous version of this abstract reported unconstrained results "on 3 seeds" with values (Tree→Building 0.729, diagonal ratio 0.196) that exist nowhere in this repository — Experiment H has never been run and the unconstrained head was deleted in commit 503db8a. The only real unconstrained measurement is the single 2026-03-24 run (0.789 / 0.094, docs/experiment_log.md "Stage B"). Rule going forward: **no number enters paper text without a pointer to a results file in this repo.** Bracketed [TBD] markers must survive until the named experiment's output exists.
 
 ### Section 1: Introduction (~0.75 page)
 - End-to-end CRF/MRF training: promise and fragility
@@ -236,6 +238,12 @@ done
 │  Tree→Bld: 0.789             Tree→Bld: 0.113     │
 └─────────────────────────────────────────────────┘
 ```
+
+> **⚠ Stale sketch values:** the constrained-panel 0.270 is the March equal-weight-BP value, which is
+> also mathematically inconsistent (the constrained head guarantees diag ratio ≥ α, and α was 0.63–0.80
+> then — see audit note in docs/neurips_research_directions_2026-06.md). The real constrained 3-seed value
+> is 0.784 ± 0.003 (pairwise_diagnostics.json). The unconstrained-panel 0.094/0.789 is the single March
+> run — regenerate BOTH panels from Experiment H + B outputs with one script/protocol before drafting.
 
 **Data source**: Extract from trained checkpoints (Experiment B)
 **Format**: matplotlib heatmap with annotated values, 2-panel figure
