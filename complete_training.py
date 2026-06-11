@@ -344,6 +344,13 @@ def main():
                         help='Ablation: use single Conv1x1 instead of 2-layer unary head')
     parser.add_argument('--diagonal_pairwise', action='store_true',
                         help='Ablation: hard diagonal pairwise (no class mixing)')
+    parser.add_argument('--unconstrained_pairwise', action='store_true',
+                        help='Experiment H: raw unconstrained K×K pairwise head '
+                             '(restored from 503db8a^) — the degeneracy reproduction arm')
+    parser.add_argument('--unconstrained_diag_init', action='store_true',
+                        help='Control arm: unconstrained head with diagonal-dominant '
+                             'init (diag≈0.80, matching constrained α-init). '
+                             'Requires --unconstrained_pairwise.')
     parser.add_argument('--dumb_pooling', action='store_true',
                         help='Ablation: replace DHBP with multi-scale pooling (receptive field baseline)')
     parser.add_argument('--n_levels', type=int, default=3,
@@ -387,6 +394,8 @@ def main():
                 "no_bp": args.no_bp,
                 "simple_unary": args.simple_unary,
                 "diagonal_pairwise": args.diagonal_pairwise,
+                "unconstrained_pairwise": args.unconstrained_pairwise,
+                "unconstrained_diag_init": args.unconstrained_diag_init,
                 "contrastive_ckpt": args.contrastive_ckpt,
                 "seed": args.seed,
                 "dumb_pooling": args.dumb_pooling,
@@ -454,11 +463,17 @@ def main():
 
     # Stage 2: Segmentation
     use_bp = not args.no_bp
+    if args.unconstrained_diag_init and not args.unconstrained_pairwise:
+        raise ValueError("--unconstrained_diag_init requires --unconstrained_pairwise")
     if args.dumb_pooling:
         use_bp = False
         print("\n*** ABLATION MODE: Dumb pooling baseline (receptive field match, no BP) ***\n")
     elif not use_bp:
         print("\n*** ABLATION MODE: BP disabled — unary head only ***\n")
+    elif args.unconstrained_pairwise:
+        print("\n*** EXPERIMENT H: UNCONSTRAINED K×K pairwise (degeneracy reproduction"
+              + (", diagonal-dominant init control" if args.unconstrained_diag_init else "")
+              + ") ***\n")
     seg_trainer = SegmentationTrainer(
         encoder=encoder,
         n_classes=6,
@@ -469,6 +484,8 @@ def main():
         diagonal_pairwise=args.diagonal_pairwise,
         n_levels=args.n_levels,
         dumb_pooling=args.dumb_pooling,
+        unconstrained_pairwise=args.unconstrained_pairwise,
+        unconstrained_diag_init=args.unconstrained_diag_init,
     )
 
     if args.epochs_seg > 0:

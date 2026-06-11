@@ -44,6 +44,8 @@ class SegmentationTrainer:
         diagonal_pairwise: bool = False,
         n_levels: int = 3,
         dumb_pooling: bool = False,
+        unconstrained_pairwise: bool = False,
+        unconstrained_diag_init: bool = False,
     ):
         self.device = device
         self.n_classes = n_classes
@@ -57,6 +59,8 @@ class SegmentationTrainer:
             self.dhbp = DHBPModule(
                 n_classes=n_classes, simple_unary=simple_unary,
                 diagonal_pairwise=diagonal_pairwise, n_levels=n_levels,
+                unconstrained_pairwise=unconstrained_pairwise,
+                unconstrained_diag_init=unconstrained_diag_init,
             ).to(device)
         self.criterion = SegmentationLoss(n_classes=n_classes).to(device)
 

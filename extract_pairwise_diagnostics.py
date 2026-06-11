@@ -45,12 +45,38 @@ from net.dhbp import DHBPModule
 CLASS_NAMES = ["Impervious", "Buildings", "Low Veg", "Trees", "Cars", "Clutter"]
 
 
-def load_model(seg_ckpt, device):
-    """Load encoder + DHBP from a segmentation checkpoint."""
-    encoder = ContrastiveEncoder(pretrained=True).to(device)
-    dhbp = DHBPModule(n_classes=6).to(device)
+def detect_pairwise_head(dhbp_state):
+    """Detect which pairwise head a checkpoint was trained with.
 
+    Returns one of: 'constrained' (alpha*I + (1-alpha)*R),
+    'unconstrained' (raw K*K conv, Experiment H), 'diagonal' (Potts-style).
+    """
+    if any(k.startswith('pairwise_12.alpha_net') for k in dhbp_state):
+        return 'constrained'
+    w = dhbp_state.get('pairwise_12.net.3.weight')
+    if w is not None:
+        # Last conv outputs K*K=36 channels for unconstrained, K=6 for diagonal
+        return 'unconstrained' if w.shape[0] == 36 else 'diagonal'
+    raise ValueError("Cannot detect pairwise head type from checkpoint keys: "
+                     + ", ".join(sorted(k for k in dhbp_state if k.startswith('pairwise_12'))[:6]))
+
+
+def load_model(seg_ckpt, device):
+    """Load encoder + DHBP from a segmentation checkpoint (any pairwise head type)."""
     ckpt = torch.load(seg_ckpt, map_location=device, weights_only=False)
+
+    head_type = 'constrained'
+    if 'dhbp_state_dict' in ckpt:
+        head_type = detect_pairwise_head(ckpt['dhbp_state_dict'])
+    print(f"  Pairwise head type: {head_type}")
+
+    encoder = ContrastiveEncoder(pretrained=True).to(device)
+    dhbp = DHBPModule(
+        n_classes=6,
+        unconstrained_pairwise=(head_type == 'unconstrained'),
+        diagonal_pairwise=(head_type == 'diagonal'),
+    ).to(device)
+
     if 'encoder_state_dict' in ckpt:
         encoder.load_state_dict(ckpt['encoder_state_dict'])
     if 'dhbp_state_dict' in ckpt:
@@ -84,33 +110,31 @@ def get_input_batch(data_dir, device, batch_size=4):
 def extract_diagnostics(encoder, dhbp, images):
     """Extract pairwise potential diagnostics from a batch of images.
 
-    Returns dict with alpha stats and the average K×K pairwise matrix.
+    Computes the effective ψ via the head's own forward() so the SAME protocol
+    applies to every head type (constrained, unconstrained, diagonal) — the
+    March 2026 numbers were computed by two different scripts, which the
+    June 2026 audit flagged as a protocol inconsistency.
+
+    Chance level for diag_ratio under row-softmax normalization is 1/K ≈ 0.167
+    (NOT 0.5): a random-init unconstrained head sits at ~0.167; values below
+    it indicate actively learned anti-diagonal (remapping) structure.
+
+    Returns dict with the average K×K pairwise matrix, diagonal metrics, and
+    alpha stats when the head has them (constrained head only).
     """
     p1, p2, p3 = encoder.encode(images)
 
-    # Get alpha and residual from pairwise_12
     pairwise = dhbp.pairwise_12
     K = pairwise.n_classes
-    B, _, H, W = p2.shape
 
-    alpha = torch.sigmoid(pairwise.alpha_net(p2))  # [B, 1, H, W]
-    residual = pairwise.residual_net(p2)            # [B, K*K, H, W]
-    residual = residual.view(B, K, K, H, W)
-    residual = F.softmax(residual, dim=2)
-
-    identity = pairwise._identity.view(1, K, K, 1, 1)
-
-    # ψ = α·I + (1-α)·R
-    alpha_5d = alpha.unsqueeze(1)  # [B, 1, 1, H, W]
-    psi = alpha_5d * identity + (1.0 - alpha_5d) * residual  # [B, K, K, H, W]
+    # Universal protocol: effective ψ from the head's forward (log-space → prob)
+    log_psi = pairwise(p2)                            # [B, K, K, H, W]
+    psi = torch.exp(log_psi)
 
     # Average across batch and spatial dimensions → K×K
     avg_psi = psi.mean(dim=(0, 3, 4)).cpu().numpy()  # [K, K]
 
-    # Alpha statistics
-    alpha_np = alpha.cpu().numpy().flatten()
-
-    # Diagonal ratio
+    # Diagonal ratio (chance level = 1/K)
     diag_sum = np.trace(avg_psi)
     total_sum = avg_psi.sum()
     diag_ratio = diag_sum / total_sum if total_sum > 0 else 0.0
@@ -125,17 +149,30 @@ def extract_diagnostics(encoder, dhbp, images):
     # Per-class diagonal strength
     per_class_diag = {CLASS_NAMES[i]: avg_psi[i, i] for i in range(K)}
 
-    return {
+    result = {
         'avg_psi': avg_psi,
         'diag_ratio': diag_ratio,
+        'chance_diag_ratio': 1.0 / K,
         'max_off_diagonal': max_off_val,
         'max_off_pair': max_off_pair,
         'per_class_diag': per_class_diag,
-        'alpha_mean': float(alpha_np.mean()),
-        'alpha_std': float(alpha_np.std()),
-        'alpha_min': float(alpha_np.min()),
-        'alpha_max': float(alpha_np.max()),
     }
+
+    # Alpha statistics — constrained head only
+    if hasattr(pairwise, 'alpha_net'):
+        alpha = torch.sigmoid(pairwise.alpha_net(p2))
+        alpha_np = alpha.cpu().numpy().flatten()
+        result.update({
+            'alpha_mean': float(alpha_np.mean()),
+            'alpha_std': float(alpha_np.std()),
+            'alpha_min': float(alpha_np.min()),
+            'alpha_max': float(alpha_np.max()),
+        })
+    else:
+        result.update({'alpha_mean': None, 'alpha_std': None,
+                       'alpha_min': None, 'alpha_max': None})
+
+    return result
 
 
 def plot_heatmap(avg_psi, title, output_path):
@@ -175,13 +212,16 @@ def print_diagnostics(diag, ckpt_name):
     print(f"  Checkpoint: {ckpt_name}")
     print(f"{'='*60}")
 
-    print(f"\n  Alpha (consistency strength):")
-    print(f"    Mean:  {diag['alpha_mean']:.4f}")
-    print(f"    Std:   {diag['alpha_std']:.4f}")
-    print(f"    Range: [{diag['alpha_min']:.4f}, {diag['alpha_max']:.4f}]")
+    if diag.get('alpha_mean') is not None:
+        print(f"\n  Alpha (consistency strength):")
+        print(f"    Mean:  {diag['alpha_mean']:.4f}")
+        print(f"    Std:   {diag['alpha_std']:.4f}")
+        print(f"    Range: [{diag['alpha_min']:.4f}, {diag['alpha_max']:.4f}]")
+    else:
+        print(f"\n  Alpha: n/a (head has no alpha_net — unconstrained/diagonal arm)")
 
     print(f"\n  Pairwise matrix (avg across spatial locations):")
-    print(f"    Diagonal ratio: {diag['diag_ratio']:.4f}")
+    print(f"    Diagonal ratio: {diag['diag_ratio']:.4f}  (chance level = 1/K = {diag['chance_diag_ratio']:.3f})")
     print(f"    Max off-diagonal: {diag['max_off_diagonal']:.4f} "
           f"({diag['max_off_pair'][0]} → {diag['max_off_pair'][1]})")
 
@@ -237,9 +277,11 @@ def main():
         print_diagnostics(diag, ckpt_name)
 
         # Save heatmap
+        head_label = ("ψ = α·I + (1-α)·R" if diag['alpha_mean'] is not None
+                      else "ψ (unconstrained / diagonal head)")
         plot_heatmap(
             diag['avg_psi'],
-            f"Pairwise ψ = α·I + (1-α)·R\n{ckpt_name} (diag ratio: {diag['diag_ratio']:.3f})",
+            f"Pairwise {head_label}\n{ckpt_name} (diag ratio: {diag['diag_ratio']:.3f}, chance 0.167)",
             os.path.join(args.output_dir, f"pairwise_heatmap_{ckpt_name}.png"),
         )
 
@@ -248,13 +290,14 @@ def main():
             'checkpoint': ckpt_path,
             'name': ckpt_name,
             'diag_ratio': float(diag['diag_ratio']),
+            'chance_diag_ratio': float(diag['chance_diag_ratio']),
             'max_off_diagonal': float(diag['max_off_diagonal']),
             'max_off_pair': list(diag['max_off_pair']),
             'per_class_diag': {k: float(v) for k, v in diag['per_class_diag'].items()},
-            'alpha_mean': float(diag['alpha_mean']),
-            'alpha_std': float(diag['alpha_std']),
-            'alpha_min': float(diag['alpha_min']),
-            'alpha_max': float(diag['alpha_max']),
+            'alpha_mean': None if diag['alpha_mean'] is None else float(diag['alpha_mean']),
+            'alpha_std': None if diag['alpha_std'] is None else float(diag['alpha_std']),
+            'alpha_min': None if diag['alpha_min'] is None else float(diag['alpha_min']),
+            'alpha_max': None if diag['alpha_max'] is None else float(diag['alpha_max']),
             'avg_psi': diag['avg_psi'].tolist(),
         }
         all_diagnostics.append(serializable)
@@ -271,11 +314,12 @@ def main():
 
         diag_ratios = [d['diag_ratio'] for d in all_diagnostics]
         max_offs = [d['max_off_diagonal'] for d in all_diagnostics]
-        alpha_means = [d['alpha_mean'] for d in all_diagnostics]
+        alpha_means = [d['alpha_mean'] for d in all_diagnostics if d['alpha_mean'] is not None]
 
-        print(f"  Diagonal ratio:    {np.mean(diag_ratios):.4f} ± {np.std(diag_ratios):.4f}")
+        print(f"  Diagonal ratio:    {np.mean(diag_ratios):.4f} ± {np.std(diag_ratios):.4f}  (chance = 0.167)")
         print(f"  Max off-diagonal:  {np.mean(max_offs):.4f} ± {np.std(max_offs):.4f}")
-        print(f"  Alpha mean:        {np.mean(alpha_means):.4f} ± {np.std(alpha_means):.4f}")
+        if alpha_means:
+            print(f"  Alpha mean:        {np.mean(alpha_means):.4f} ± {np.std(alpha_means):.4f}")
 
         # Average pairwise matrix across seeds
         avg_matrices = np.array([d['avg_psi'] for d in all_diagnostics])

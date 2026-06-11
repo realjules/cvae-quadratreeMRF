@@ -255,6 +255,66 @@ class PairwisePotentialHead(nn.Module):
         return torch.log(psi + 1e-8)                        # log-space for BP
 
 
+class UnconstrainedPairwiseHead(nn.Module):
+    """Unconstrained K×K pairwise potential — restored from commit 503db8a^.
+
+    Raw conv stack → K·K logits → log_softmax over child states. No diagonal
+    prior, no constraint. This is the head that exhibited class-remapping
+    degeneracy in the single 2026-03-24 run (diagonal ratio 0.094,
+    Tree→Building 0.789). Restored for:
+
+      - Experiment H: 3-seed reproduction of the degeneracy in the current
+        entropy-gated pipeline (the headline currently rests on n=1).
+      - Diagonal-init control (diag_init=True): same head, but the last
+        conv's bias initializes ψ diagonal-dominant (diag ≈ 0.80, matching
+        the constrained head's α-init) — disambiguates "remapping is a
+        training attractor" (an initially-healthy ψ gets destroyed) from
+        "the constraint just installs a good init" (the diagonal survives).
+
+    At default init (diag_init=False) the row-softmax gives diag ratio
+    ≈ 1/K ≈ 0.167 — the chance level all diagnostics should be read against.
+    """
+
+    def __init__(self, in_channels: int, n_classes: int, diag_init: bool = False):
+        super().__init__()
+        self.n_classes = n_classes
+        self.diag_init = diag_init
+        mid = max(in_channels // 2, n_classes * n_classes)
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, mid, 1),
+            nn.BatchNorm2d(mid),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid, n_classes * n_classes, 1),
+        )
+        if diag_init:
+            # bias[k*K+k] = ln(0.8·(K−1)/0.2) ≈ 3.0 for K=6 → softmax row has
+            # diagonal mass ≈ 0.80, matching the constrained head's init prior
+            # so the two arms start from the same effective ψ.
+            K = n_classes
+            diag_bias = float(torch.log(torch.tensor(0.8 * (K - 1) / 0.2)))
+            bias = torch.zeros(K * K)
+            for k in range(K):
+                bias[k * K + k] = diag_bias
+            with torch.no_grad():
+                self.net[-1].bias.copy_(bias)
+
+    def forward(self, feat: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            feat: [B, C_in, H, W] encoder features at parent resolution
+
+        Returns:
+            [B, K, K, H, W] log-pairwise potentials.
+            Dimension 1 = parent state, dimension 2 = child state.
+            Normalized over child states (dim=2) via log_softmax.
+        """
+        K = self.n_classes
+        B, _, H, W = feat.shape
+        raw = self.net(feat)                         # [B, K*K, H, W]
+        psi = raw.view(B, K, K, H, W)               # [B, K_parent, K_child, H, W]
+        return F.log_softmax(psi, dim=2)             # normalize over child states
+
+
 def _child_to_parent(
     child_belief: torch.Tensor,
     log_psi: torch.Tensor,
@@ -377,10 +437,13 @@ class DHBPModule(nn.Module):
     """
 
     def __init__(self, n_classes: int = 6, simple_unary: bool = False,
-                 diagonal_pairwise: bool = False, n_levels: int = 3):
+                 diagonal_pairwise: bool = False, n_levels: int = 3,
+                 unconstrained_pairwise: bool = False,
+                 unconstrained_diag_init: bool = False):
         super().__init__()
         self.n_classes = n_classes
         self.n_levels = n_levels
+        self.unconstrained_pairwise = unconstrained_pairwise
 
         # Unary potential heads (features → log class probabilities)
         UHead = SimpleUnaryHead if simple_unary else UnaryPotentialHead
@@ -388,9 +451,17 @@ class DHBPModule(nn.Module):
             print("DHBP: using SimpleUnaryHead (Conv1x1 linear projection)")
 
         # Pairwise potential heads
-        PHead = DiagonalPairwiseHead if diagonal_pairwise else PairwisePotentialHead
-        if diagonal_pairwise:
-            print("DHBP: using DiagonalPairwiseHead (no class mixing)")
+        if unconstrained_pairwise and diagonal_pairwise:
+            raise ValueError("--unconstrained_pairwise and --diagonal_pairwise are mutually exclusive")
+        if unconstrained_pairwise:
+            from functools import partial
+            PHead = partial(UnconstrainedPairwiseHead, diag_init=unconstrained_diag_init)
+            print("DHBP: using UnconstrainedPairwiseHead (raw K×K, NO constraint)"
+                  + (" with DIAGONAL-DOMINANT INIT (control arm)" if unconstrained_diag_init else ""))
+        else:
+            PHead = DiagonalPairwiseHead if diagonal_pairwise else PairwisePotentialHead
+            if diagonal_pairwise:
+                print("DHBP: using DiagonalPairwiseHead (no class mixing)")
 
         print(f"DHBP: {n_levels} levels")
 
