@@ -505,7 +505,11 @@ def main():
         wandb.summary["total_time_s"] = total_time
         wandb.finish()
 
-    return 0 if final_metrics['accuracy'] >= 90.0 else 1
+    # Exit 0 when the pipeline completed successfully. (This previously
+    # returned 1 unless accuracy >= 90% — an aspirational target from the
+    # original project goal — which made EVERY completed run look like a
+    # failure to shells, notebooks, and CI. Found 2026-06-12.)
+    return 0
 
 
 if __name__ == "__main__":

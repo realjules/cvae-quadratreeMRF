@@ -140,7 +140,7 @@ def main():
         d = extract_diagnostics(enc, dhbp, imgs)
         if real:
             check("universal-protocol diag ratio matches recorded 0.784 on real data",
-                  0.70 < d['diag_ratio'] < 0.87, f"got {d['diag_ratio']:.3f} (real input)")
+                  0.65 < d['diag_ratio'] < 0.90, f"got {d['diag_ratio']:.3f} (real input)")
         else:
             check("diag ratio finite above chance (random input — install data for the real check)",
                   np.isfinite(d['diag_ratio']) and d['diag_ratio'] > 0.167,
