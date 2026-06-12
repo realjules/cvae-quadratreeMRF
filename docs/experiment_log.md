@@ -1677,6 +1677,91 @@ Experiment C (constrained vs unconstrained cosine) is DROPPED — it cannot disa
 
 ---
 
+## Experiment 20: Week-1 Gates — Session A (2026-06-12)
+
+**Config**: Kaggle T4, `notebook_week1_gates.ipynb` RUN_SESSION="A", 10% labels (1 area),
+30 seg epochs, contrastive checkpoint epoch 43, decision rules pre-registered in
+`docs/week1_gates_runbook.md`. Results: `output/week1_sessionA_results/`.
+
+### Gate N — eval-noise floor: σ = 0.70pp (k=10, seed0 BP checkpoint)
+
+66.05 ± 0.70 (range 64.40–67.25). **The 12-agent review's 5–8pp noise-floor estimate was
+a ~10x overestimate.** Real noise hierarchy: eval sampling ±0.7pp < seed-to-seed training
+variance ±1.2–2.0pp. Consequences: (a) March single-run deltas ≳2pp regain some evidentiary
+value; (b) best-epoch selection inflates "best" by only ~+0.5pp; (c) all future claims read
+against seed variance, not eval noise.
+
+### Gate D — dumb pooling (3 seeds, trained): explains ~60% of the BP gain
+
+Best accuracy from training logs: 64.53 / 60.70 / 63.54 → **62.9 ± 2.0** (mean ± sample std).
+k=3 re-eval protocol on the same checkpoints (BP arm re-measured the same day): BP 64.90 ± 0.67,
+no-BP 59.53 ± 0.74, dumb-pool (one arm in session JSON due to a since-fixed name-collision bug;
+3-seed local re-eval pending): 63.03 ± 0.98.
+
+```
+no-BP 59.5  <  dumb-pool ~62.9-63.0  <  BP 64.9-65.3
+Multi-scale context explains ~60% of the BP-vs-no-BP gap.
+BP residual edge over RF-matched baseline: ~+2pp (t≈1.7 at n=3 — NOT yet significant).
+```
+
+**Verdict (per pre-registered rule): intermediate.** Neither "pooling matches" (kill) nor a
+decisive BP win. Paper wording MUST become "BP retains a ~2pp edge over a receptive-field-matched
+baseline, concentrated in minority classes" — never "the +4.65pp benefit of structured prediction."
+Notable: dumb-pool Cars ≈ 18% vs BP-arm Cars ≈ 33% — the residual edge concentrates exactly where
+entropy gating preserves minority signal.
+
+### Gate U — unconstrained seed 0: partial reproduction, with STRUCTURE
+
+Diag ratio after 30 epochs: **0.281** (init 0.169, chance 0.167, constrained 0.784, March
+collapsed-unary run 0.094). In the pre-registered in-between zone (0.25–0.4). But the matrix is
+qualitatively the remapping phenomenon — row-wise, not wholesale:
+
+```
+Row (parent)   diag    dominant off-diagonal
+Trees          0.080   → Impervious 0.659   REMAPPED
+Cars           0.248   → Impervious 0.504   leaning remapped
+Clutter        0.035   → Impervious 0.399   REMAPPED
+Impervious     0.237   → Buildings  0.427   leaning remapped
+Buildings      0.687   (healthy)
+Low Veg        0.397   → Trees 0.322 (plausibly legitimate transition)
+```
+
+Weak/minority rows dump their mass onto majority classes (March signature was Tree→Building 0.789;
+here Trees→Impervious 0.659). Accuracy cost vs constrained: ~2–3pp overall; Cars 16.9% vs ~33%
+(minority destruction reproduces). **The scalar diag ratio undersells the effect — the planned
+row-wise/permutation-distance metrics are now mandatory, not optional.** Seeds 1–2 + the
+diagonal-init control (Session B) decide the final verdict.
+
+### Gate R — removal gap (3 seeds, k=3): real, but wildly seed-heterogeneous
+
+```
+seed   with_bp        unary_only     gap
+0      65.76 ± 0.26   45.81 ± 0.85   +19.95pp
+1      64.83 ± 0.70   60.38 ± 0.38    +4.45pp
+2      64.12 ± 0.55   55.04 ± 0.45    +9.08pp
+mean                                 +11.2 ± 6.5pp
+no-BP-trained unary baselines: 60.11 / 60.02 / 58.46 (mean 59.53)
+```
+
+All gaps positive and ≫ eval noise — the dependency is seed-robust in direction. BUT: (a) the
+single-run 25.4pp headline (50-epoch ckpts) does NOT generalize — 30-epoch mean offloading vs the
+no-BP baseline is only ~5.8pp; (b) seed 1 shows essentially NO offloading (unary_only 60.38 ≈
+no-BP 59.53) while seed 0 collapses (45.81). **Inference offloading is real but highly variable
+across seeds — the variance is itself the finding.** Unconstrained arm gap: +11.07pp (1 seed).
+
+### Updated claims after Session A
+
+- RETIRE: "5–8pp eval noise floor" (measured: 0.7pp), "+4.65pp benefit of structured prediction"
+  (≈60% is receptive field), "25.4pp removal gap" as a stable magnitude (it is the seed-0 tail of
+  a 4.5–20pp distribution).
+- STRENGTHENED: minority-row class remapping under unconstrained potentials reproduces in the
+  current pipeline (n=1, structure-level; aggregate milder than March); BP dependency direction
+  (3/3 seeds positive).
+- PENDING (Session B): unconstrained seeds 1–2; diagonal-init control ×3 (attractor vs init);
+  then the metric-hardening pass (Hungarian permutation distance, co-occurrence null).
+
+---
+
 ## Upcoming Experiments
 
 See `TODO.md` for full prioritized list and ruled-out items with evidence.

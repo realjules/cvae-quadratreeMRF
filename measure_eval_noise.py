@@ -129,6 +129,15 @@ def main():
     results = {}
     for ckpt in args.seg_ckpt:
         name = os.path.basename(ckpt).replace('.pth', '')
+        # Generic filenames (best_segmentation.pth) collide across run dirs —
+        # disambiguate with the parent directory (found 2026-06-12: Session A
+        # Cell 12 silently kept only the last of three dumb-pool seeds).
+        if name in ('best_segmentation', 'final_segmentation', 'model'):
+            name = f"{os.path.basename(os.path.dirname(ckpt)) or 'ckpt'}_{name}"
+        base, k = name, 1
+        while name in results:
+            name = f"{base}_{k}"
+            k += 1
         print(f"\n{'='*60}\n  {name}\n{'='*60}")
         results[name] = {}
 
